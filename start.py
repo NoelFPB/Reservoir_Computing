@@ -511,13 +511,13 @@ def main():
         
         print(f"\n[DEBUG] INTERPRETATION:")
         if test_nmse < 0.1:
-            print("         🎉 EXCELLENT performance!")
+            print("         EXCELLENT performance!")
         elif test_nmse < 0.5:
-            print("         ✅ GOOD performance")
+            print("         GOOD performance")
         elif test_nmse < 1.0:
-            print("         ⚠️  MEDIOCRE performance")
+            print("         MEDIOCRE performance")
         else:
-            print("         ❌ POOR performance (worse than predicting average)")
+            print("         POOR performance (worse than predicting average)")
 
     except KeyboardInterrupt:
         print("Interrupted.")
