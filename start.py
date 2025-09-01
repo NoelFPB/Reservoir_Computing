@@ -116,13 +116,53 @@ class PhotonicReservoir:
         self.serial.reset_output_buffer()
 
     def _init_scope(self):
+        """Initialize Rigol HDO1074 for PD measurement."""
         self.rm = pyvisa.ResourceManager()
-        resources = self.rm.list_resources()
+        resources = list(self.rm.list_resources())
         if not resources:
-            raise RuntimeError("No VISA resources found for scope")
-        # Open the first resource by default (edit if you need a specific VISA address)
-        self.scope = self.rm.open_resource(resources[0])
-        self.scope.timeout = 5000
+            raise RuntimeError("No VISA resources found")
+
+        visa_addr = resources[0]  # or hardcode your HDO address
+        print(f"[SCPI] Opening {visa_addr}")
+        scope = self.rm.open_resource(visa_addr)
+        scope.timeout = 5000
+        scope.read_termination = '\n'
+        scope.write_termination = '\n'
+
+        # Handshake
+        idn = scope.query('*IDN?').strip()
+        print(f"[SCPI] *IDN? -> {idn}")
+        if "RIGOL" not in idn.upper():
+            print("[SCPI] Warning: Expected a Rigol HDO, but got:", idn)
+
+        self.scope_vendor = "RIGOL"
+
+        # Clear status & start acquisition
+        scope.write('*CLS')
+        try:
+            scope.write(':RUN')
+        except Exception:
+            pass
+
+        # Turn on the channels we’ll read and set scale/offset
+        for ch in self.cfg.scope_channels:
+            # Rigol accepts both CHANnelN and CHN
+            scope.write(f':CHANnel{ch}:DISPlay ON')
+            scope.write(f':CHANnel{ch}:SCALe 2')
+            scope.write(f':CHANnel{ch}:OFFSet 0')
+
+        # Optional: averaging helps noisy PDs (turn off if you want raw)
+        # scope.write(':ACQuire:TYPE AVERage')
+        # scope.write(':ACQuire:AVERages 4')
+
+        # Enable measurement engine (some firmware requires STATe ON)
+        try:
+            scope.write(':MEASure:STATe ON')
+        except Exception:
+            pass
+
+        return scope
+
 
     def _prime_scope(self):
         # Turn on and set up the channels we will read
@@ -158,36 +198,87 @@ class PhotonicReservoir:
         self.serial.flush()
 
     # ---------- SCOPE READ ----------
-    def _read_channel_once(self, ch: int) -> Optional[float]:
+
+    def _read_channel_once(self, ch: int):
         """
-        Try a few common SCPI queries. Replace the first working line with your scope's preferred command.
-        Returns a single float voltage sample (V).
+        Rigol HDO: prefer MEASure:ITEM? VAVG,CHANnelN.
+        Fallback to MEASure:VAVerage? CHANnelN, then waveform mean.
         """
         if SIMULATION_MODE:
-            # Simulated PD reading in volts (noisy sigmoid-ish response)
             return float(np.clip(2.0 + 0.05*np.random.randn(), 0.0, 5.0))
 
+        s = self.scope
         try:
-            # Try a simple DC measurement (common on many scopes)
-            # 1) Tek/Keysight style:
+            # Keep acquisition running for MEAS
             try:
-                v = float(self.scope.query(f':MEASure:VAVerage? CHANnel{ch}'))
-                return v
+                s.write(':RUN')
             except Exception:
                 pass
 
-            # 2) Fallback: statistic current mean
+            # Primary: Rigol "item" query
             try:
-                v = float(self.scope.query(f':MEASure:STATistic:ITEM? CURRent,MEAN,CHANnel{ch}'))
-                return v
+                val = float(s.query(f':MEASure:ITEM? VAVG,CHANnel{ch}'))
+                return val
             except Exception:
                 pass
 
-            # 3) Last resort: peak (not ideal, but better than nothing)
-            v = float(self.scope.query(f':MEASure:STATistic:ITEM? CURRent,VMAX,CHANnel{ch}'))
-            return v
+            # Secondary: legacy alias on some models
+            try:
+                val = float(s.query(f':MEASure:VAVerage? CHANnel{ch}'))
+                return val
+            except Exception:
+                pass
+
+            # Last resort: fetch waveform and compute mean
+            return self._rigol_waveform_mean(ch)
+
         except Exception:
+            # Print the error queue to see what the scope complained about
+            try:
+                err = s.query(':SYSTem:ERRor?').strip()
+                print(f"[SCPI] Rigol error: {err}")
+            except Exception:
+                pass
             return None
+        
+    def _rigol_waveform_mean(self, ch: int) -> float:
+        """
+        Rigol waveform fetch + mean. Keeps it simple: BYTE format, NORMal mode.
+        """
+        s = self.scope
+        # Make sure we are running
+        try:
+            s.write(':RUN')
+        except Exception:
+            pass
+
+        # Source & format
+        # Rigol accepts CHANnelN or CHN in many cases; CHANnelN is safest
+        s.write(f':WAVeform:SOURce CHANnel{ch}')
+        s.write(':WAVeform:FORMat BYTE')
+        s.write(':WAVeform:MODE NORMal')
+
+        # Get scaling from preamble
+        pre = s.query(':WAVeform:PREamble?').strip()
+        # Rigol PREamble returns comma-separated fields; Y increment (~volts/LSB) and origin/ref are included
+        # Typical order: FORMAT,TYPE,POINTS,COUNT,XINCR,XORIG,XREF,YINCR,YORIG,YREF
+        fields = pre.split(',')
+        if len(fields) < 10:
+            raise RuntimeError(f"Unexpected PREamble: {pre}")
+        y_incr = float(fields[8])   # YINCR
+        y_orig = float(fields[9])   # YORIG
+        y_ref  = float(fields[10]) if len(fields) > 10 else 0.0  # YREF (some firmwares put it here)
+
+        # Fetch raw bytes
+        raw = s.query_binary_values(':WAVeform:DATA?', datatype='B', is_big_endian=False)
+        data = np.array(raw, dtype=np.float64)
+
+        # Convert to volts (Rigol scaling)
+        # V = (data - YREF) * YINCR + YORIG
+        volts = (data - y_ref) * y_incr + y_orig
+        return float(np.mean(volts))
+
+
 
     def read_outputs(self, avg_samples: int = 1) -> np.ndarray:
         vals = []
