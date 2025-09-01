@@ -1,371 +1,85 @@
-import serial
-import time
-import pyvisa
+"""
+Minimal photonic reservoir controller (Rigol HDO1074 + serial heaters)
+
+What it does (end-to-end):
+1) Randomize internal heaters once (fixed mesh "reservoir").
+2) Drive scalar input sequence over time onto selected input heaters.
+3) Read 4 PD channels from the scope, K times per symbol (virtual nodes).
+4) Train a ridge regression readout for a simple task (MG/NARMA10).
+5) Report NMSE.
+
+Edit the CONFIG section only.
+"""
+
+# ==========================
+# CONFIG (EDIT THESE)
+# ==========================
+SERIAL_PORT = 'COM3'
+BAUD_RATE = 115200
+
+# Scope: Rigol HDO1074 channels wired to your PDs (choose 4 or 7, etc.)
+SCOPE_CHANNELS = [1, 2, 3, 4]
+
+# Heaters you modulate with the input stream
+INPUT_HEATERS = [32, 33, 34, 35, 36, 37]
+
+# All heaters addressable in your firmware (0..39 common in your code)
+ALL_HEATERS = list(range(40))
+
+# Safe heater voltages
+V_MIN, V_MAX = 0.20, 4.90
+V_BIAS_INTERNAL = 2.50   # internal mesh baseline
+V_BIAS_INPUT = 2.50      # input heaters baseline
+
+# Reservoir timing
+T_SYMBOL = 0.10          # s per symbol (pick ~2× thermal tau as a start)
+K_VIRTUAL = 4            # virtual nodes per symbol (time-multiplexing)
+SETTLE = 0.020           # s to wait after each heater update
+READ_AVG = 3             # scope reads to average each sample
+
+# Input drive scaling (keep modest; too big will clip heaters)
+MASK_GAIN = 0.30
+MICRO_MASK_GAIN = 0.10
+
+# Dataset sizes
+TRAIN_STEPS = 2000
+TEST_STEPS = 800
+WASHOUT = 200
+
+# Task: 'mackey_glass' or 'narma10'
+TASK = 'mackey_glass'
+
+# Dry-run without hardware (simulated PD readings)
+SIMULATION_MODE = False
+
+# ==========================
+# IMPORTS
+# ==========================
+import time, serial, pyvisa
 import numpy as np
-import random
-from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
 
 # ==========================
-# USER CONFIG (EDIT THESE)
+# SMALL HELPERS
 # ==========================
-SERIAL_PORT = 'COM3'
-BAUD_RATE = 115200
+def rand_mask(n):
+    """Balanced ±1 mask of length n."""
+    m = np.ones(n)
+    m[np.random.choice(n, size=n//2, replace=False)] = -1
+    return m
 
-# Photodiode channels on your scope (1..4 or 1..7)
-SCOPE_CHANNELS = [1, 2, 3, 4]   # change to [1,2,3,4,5,6,7] if you have 7 outputs available
-NUM_OUTPUTS = len(SCOPE_CHANNELS)
-
-# Heaters you will modulate with the scalar input stream (1–7 heaters is fine)
-INPUT_HEATERS = [32, 33, 34, 35, 36, 37]        # you can add more, e.g., [34,35,36,37,38,39,40]
-
-# All other tunable heaters used as fixed mesh bias (random offsets)
-ALL_HEATERS = list(range(40))   # edit if your address space is different
-INTERNAL_HEATERS = [h for h in ALL_HEATERS if h not in INPUT_HEATERS]
-
-# Safe voltage limits for heaters
-V_MIN = 0.20
-V_MAX = 4.90
-V_BIAS = 2.50                  # mid-bias for internal heaters
-V_INPUT_BIAS = 2.50            # mid-bias for input heaters
-
-# Reservoir timing
-T_SYMBOL = 0.10                # seconds per symbol (≈ 2× heater tau is a good start)
-K_VIRTUAL = 4                  # virtual nodes per symbol (time-multiplexing factor)
-SETTLE_PER_SUBSLOT = 0.020     # wait after updating heaters before reading (s)
-READ_AVG_SAMPLES = 3           # average N reads for noise reduction
-
-# Input drive scaling
-MASK_GAIN = 0.30               # scales s_t onto heaters (fraction of full-scale)
-MICRO_MASK_GAIN = 0.10         # tiny offset per sub-slot (jitter mask)
-
-# Data lengths
-TRAIN_STEPS = 3000
-TEST_STEPS = 1000
-WASHOUT = 200                  # discard initial transients
-
-# Task: 'mackey_glass' or 'narma10'
-TASK = 'mackey_glass'
-
-# Optional: run without hardware for dry-run testing (simulated readings)
-SIMULATION_MODE = False
-
-# ==========================
-# HELPER DATA STRUCTURES
-# ==========================
-@dataclass
-class ReservoirConfig:
-    input_heaters: List[int]
-    internal_heaters: List[int]
-    scope_channels: List[int]
-    v_min: float
-    v_max: float
-    v_bias: float
-    v_input_bias: float
-    mask_gain: float
-    micro_mask_gain: float
-    t_symbol: float
-    k_virtual: int
-    settle_per_subslot: float
-    read_avg_samples: int
-
-# ==========================
-# HARDWARE INTERFACE
-# ==========================
-class PhotonicReservoir:
-    def __init__(self, cfg: ReservoirConfig):
-        self.cfg = cfg
-        self.serial = None
-        self.scope = None
-        self.rm = None
-
-        # Precompute per-input random mask (fixed over the whole experiment)
-        self.main_mask = self._make_mask(len(cfg.input_heaters))
-        # Per-subslot micro-masks (K of them)
-        self.micro_masks = [self._make_mask(len(cfg.input_heaters)) for _ in range(cfg.k_virtual)]
-
-        # Fixed random biases for the internal heaters (mesh mixing)
-        rng = np.random.default_rng()
-        self.mesh_bias = {
-            h: float(np.clip(cfg.v_bias + rng.normal(0, 1.0), cfg.v_min, cfg.v_max))
-            for h in cfg.internal_heaters
-        }
-
-        print(self.mesh_bias)
-
-        # Input heater biases
-        self.input_bias = {h: cfg.v_input_bias for h in cfg.input_heaters}
-
-        if not SIMULATION_MODE:
-            self._init_serial()
-            self._init_scope()
-            self._prime_scope()
-
-    def _make_mask(self, n: int) -> np.ndarray:
-        # entries in {-1, +1} with ~balanced signs
-        m = np.ones(n)
-        idx = np.random.choice(n, size=n//2, replace=False)
-        m[idx] = -1
-        return m
-
-    def _init_serial(self):
-        self.serial = serial.Serial(SERIAL_PORT, BAUD_RATE)
-        time.sleep(0.8)
-        self.serial.reset_input_buffer()
-        self.serial.reset_output_buffer()
-
-    def _init_scope(self):
-        """Initialize Rigol HDO1074 for PD measurement."""
-        self.rm = pyvisa.ResourceManager()
-        resources = list(self.rm.list_resources())
-        if not resources:
-            raise RuntimeError("No VISA resources found")
-
-        visa_addr = resources[0]  # or hardcode your HDO address
-        print(f"[SCPI] Opening {visa_addr}")
-        self.scope = self.rm.open_resource(visa_addr)
-        self.scope.timeout = 5000
-        self.scope.read_termination = '\n'
-        self.scope.write_termination = '\n'
-
-        # Handshake
-        idn = self.scope.query('*IDN?').strip()
-        print(f"[SCPI] *IDN? -> {idn}")
-        if "RIGOL" not in idn.upper():
-            print("[SCPI] Warning: Expected a Rigol HDO, but got:", idn)
-
-        self.scope_vendor = "RIGOL"
-
-        # Clear status & start acquisition
-        self.scope.write('*CLS')
-        try:
-            self.scope.write(':RUN')
-        except Exception:
-            pass
-
-        # Turn on the channels we’ll read and set scale/offset
-        for ch in self.cfg.scope_channels:
-            # Rigol accepts both CHANnelN and CHN
-            self.scope.write(f':CHANnel{ch}:DISPlay ON')
-            self.scope.write(f':CHANnel{ch}:SCALe 2')
-            self.scope.write(f':CHANnel{ch}:OFFSet 0')
-
-        # Optional: averaging helps noisy PDs (turn off if you want raw)
-        # scope.write(':ACQuire:TYPE AVERage')
-        # scope.write(':ACQuire:AVERages 4')
-
-        # Enable measurement engine (some firmware requires STATe ON)
-        try:
-            self.scope.write(':MEASure:STATe ON')
-        except Exception:
-            pass
-
-
-
-    def _prime_scope(self):
-        # Turn on and set up the channels we will read
-        for ch in self.cfg.scope_channels:
-            self.scope.write(f':CHANnel{ch}:DISPlay ON')
-            self.scope.write(f':CHANnel{ch}:SCALe 2')
-            self.scope.write(f':CHANnel{ch}:OFFSet 0')
-
-        # Optional: set acquisition mode to average if your scope supports it (comment if not)
-        # self.scope.write(':ACQuire:TYPE NORMal')
-        # self.scope.write(':MEASure:CLEar')
-
-    def cleanup(self):
-        try:
-            if self.serial:
-                self.serial.close()
-            if self.scope:
-                self.scope.close()
-            if self.rm:
-                self.rm.close()
-        except Exception:
-            pass
-
-    # ---------- SERIAL COMM ----------
-    def send_heater_values(self, config: Dict[int, float]):
-        """
-        Same wire format you already use: 'heater,value;...\\n'
-        """
-        msg = "".join(f"{h},{float(v):.3f};" for h, v in config.items()) + "\n"
-        if SIMULATION_MODE:
-            return
-        self.serial.write(msg.encode())
-        self.serial.flush()
-
-    # ---------- SCOPE READ ----------
-
-    def _read_channel_once(self, ch: int):
-        """
-        Rigol HDO: prefer MEASure:ITEM? VAVG,CHANnelN.
-        Fallback to MEASure:VAVerage? CHANnelN, then waveform mean.
-        """
-        if SIMULATION_MODE:
-            return float(np.clip(2.0 + 0.05*np.random.randn(), 0.0, 5.0))
-
-        s = self.scope
-        try:
-            # Keep acquisition running for MEAS
-            try:
-                s.write(':RUN')
-            except Exception:
-                pass
-
-            # Primary: Rigol "item" query
-            try:
-                val = float(s.query(f':MEASure:ITEM? VAVG,CHANnel{ch}'))
-                return val
-            except Exception:
-                pass
-
-            # Secondary: legacy alias on some models
-            try:
-                val = float(s.query(f':MEASure:VAVerage? CHANnel{ch}'))
-                return val
-            except Exception:
-                pass
-
-            # Last resort: fetch waveform and compute mean
-            return self._rigol_waveform_mean(ch)
-
-        except Exception:
-            # Print the error queue to see what the scope complained about
-            try:
-                err = s.query(':SYSTem:ERRor?').strip()
-                print(f"[SCPI] Rigol error: {err}")
-            except Exception:
-                pass
-            return None
-        
-    def _rigol_waveform_mean(self, ch: int) -> float:
-        """
-        Rigol waveform fetch + mean. Keeps it simple: BYTE format, NORMal mode.
-        """
-        s = self.scope
-        # Make sure we are running
-        try:
-            s.write(':RUN')
-        except Exception:
-            pass
-
-        # Source & format
-        # Rigol accepts CHANnelN or CHN in many cases; CHANnelN is safest
-        s.write(f':WAVeform:SOURce CHANnel{ch}')
-        s.write(':WAVeform:FORMat BYTE')
-        s.write(':WAVeform:MODE NORMal')
-
-        # Get scaling from preamble
-        pre = s.query(':WAVeform:PREamble?').strip()
-        # Rigol PREamble returns comma-separated fields; Y increment (~volts/LSB) and origin/ref are included
-        # Typical order: FORMAT,TYPE,POINTS,COUNT,XINCR,XORIG,XREF,YINCR,YORIG,YREF
-        fields = pre.split(',')
-        if len(fields) < 10:
-            raise RuntimeError(f"Unexpected PREamble: {pre}")
-        y_incr = float(fields[8])   # YINCR
-        y_orig = float(fields[9])   # YORIG
-        y_ref  = float(fields[10]) if len(fields) > 10 else 0.0  # YREF (some firmwares put it here)
-
-        # Fetch raw bytes
-        raw = s.query_binary_values(':WAVeform:DATA?', datatype='B', is_big_endian=False)
-        data = np.array(raw, dtype=np.float64)
-
-        # Convert to volts (Rigol scaling)
-        # V = (data - YREF) * YINCR + YORIG
-        volts = (data - y_ref) * y_incr + y_orig
-        return float(np.mean(volts))
-
-
-
-    def read_outputs(self, avg_samples: int = 1) -> np.ndarray:
-        vals = []
-        for ch in self.cfg.scope_channels:
-            samples = []
-            for _ in range(avg_samples):
-                v = self._read_channel_once(ch)
-                if v is not None:
-                    samples.append(v)
-                # tiny pause between repeated reads
-                time.sleep(0.002)
-            if len(samples) == 0:
-                vals.append(np.nan)
-            else:
-                vals.append(float(np.mean(samples)))
-        return np.array(vals, dtype=float)
-
-    # ---------- DRIVE & RECORD ----------
-    def _compose_config(self, s_scalar: float, subslot_idx: int) -> Dict[int, float]:
-        """
-        Build heater vector for this (symbol, subslot):
-          V_input = bias + MASK_GAIN * main_mask * s + MICRO_MASK_GAIN * micro_mask[subslot]
-          V_internal = fixed mesh_bias
-        """
-        cfg = {}
-        # internal biases
-        cfg.update(self.mesh_bias)
-
-        # inputs
-        mm = self.main_mask
-        rr = self.micro_masks[subslot_idx]
-        for i, h in enumerate(self.cfg.input_heaters):
-            v = self.input_bias[h] + self.cfg.mask_gain * mm[i] * s_scalar + self.cfg.micro_mask_gain * rr[i]
-            v = float(np.clip(v, self.cfg.v_min, self.cfg.v_max))
-            cfg[h] = v
-
-        return cfg
-
-    def drive_sequence(self, s: np.ndarray) -> np.ndarray:
-        """
-        Drive the reservoir with scalar input sequence s[t] of length T.
-        Returns features matrix Z of shape (T, NUM_OUTPUTS * K_VIRTUAL)
-        """
-        T = len(s)
-        feats = np.zeros((T, NUM_OUTPUTS * self.cfg.k_virtual), dtype=float)
-
-        for t in range(T):
-            for k in range(self.cfg.k_virtual):
-                # Apply heater values for this sub-slot
-                cfg = self._compose_config(float(s[t]), k)
-                self.send_heater_values(cfg)
-
-                # Let things settle (crucial vs heater tau)
-                time.sleep(self.cfg.settle_per_subslot)
-
-                # Read PDs (average a few samples)
-                y = self.read_outputs(avg_samples=self.cfg.read_avg_samples)
-                feats[t, k*NUM_OUTPUTS:(k+1)*NUM_OUTPUTS] = y
-
-            # Optional: ensure one full symbol duration passes
-            total_used = self.cfg.k_virtual * (self.cfg.settle_per_subslot)
-            if self.cfg.t_symbol > total_used:
-                time.sleep(self.cfg.t_symbol - total_used)
-
-        return feats
-
-# ==========================
-# TASK GENERATORS
-# ==========================
-def gen_mackey_glass(T: int, tau: int = 17, beta=0.2, gamma=0.1, n=10, x0=1.2, dt=1.0) -> np.ndarray:
-    """
-    Simple discrete Mackey-Glass generator (normalized to ~[0,1]).
-    """
+def mackey_glass(T, tau=17, beta=0.2, gamma=0.1, n=10, x0=1.2, dt=1.0):
     x = np.zeros(T + tau + 1)
     x[:tau+1] = x0
     for t in range(tau+1, T + tau + 1):
         x[t] = x[t-1] + dt * (beta * x[t-tau] / (1 + x[t-tau]**n) - gamma * x[t-1])
     seq = x[tau+1:]
-    # Normalize to 0..1
-    seq = (seq - np.min(seq)) / (np.max(seq) - np.min(seq) + 1e-9)
+    seq = (seq - seq.min()) / (seq.max() - seq.min() + 1e-12)
     return seq
 
-def gen_narma10(T: int, u: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    NARMA10 benchmark. Returns (u, y) with u in [0,0.5].
-    """
+def narma10(T, u=None):
     if u is None:
         u = 0.5 * np.random.rand(T)
     y = np.zeros(T)
@@ -373,121 +87,221 @@ def gen_narma10(T: int, u: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.
         y[t] = 0.3*y[t-1] + 0.05*y[t-1]*np.sum(y[t-10:t]) + 1.5*u[t-10]*u[t-1] + 0.1
     return u, y
 
-# ==========================
-# TRAIN / EVAL
-# ==========================
-def build_features(Z_raw: np.ndarray, quadratic: bool = True) -> np.ndarray:
-    """
-    Expand features with bias and (optional) per-channel quadratic terms.
-    """
-    T, D = Z_raw.shape
+def build_features(Z, quadratic=True):
+    """Features = [1, Z, Z^2] (or [1, Z])."""
     if quadratic:
-        Zq = Z_raw**2
-        X = np.hstack([np.ones((T,1)), Z_raw, Zq])
-    else:
-        X = np.hstack([np.ones((T,1)), Z_raw])
-    return X
+        return np.hstack([np.ones((len(Z),1)), Z, Z**2])
+    return np.hstack([np.ones((len(Z),1)), Z])
 
-def train_ridge(X: np.ndarray, y: np.ndarray, alphas=(1e-4, 1e-3, 1e-2, 1e-1, 1.0)) -> Tuple[Ridge, float]:
-    """
-    Simple K-fold CV to pick alpha, then fit Ridge.
-    """
-    best_alpha = None
-    best_score = float('inf')
+def train_ridge(X, y, alphas=(1e-4,1e-3,1e-2,1e-1,1.0)):
+    """Tiny CV to choose alpha, then fit."""
+    best_a, best_mse = None, float('inf')
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
     for a in alphas:
         errs = []
         for tr, va in kf.split(X):
-            model = Ridge(alpha=a, fit_intercept=False)  # intercept already in features
-            model.fit(X[tr], y[tr])
-            yhat = model.predict(X[va])
-            errs.append(mean_squared_error(y[va], yhat))
+            mdl = Ridge(alpha=a, fit_intercept=False)
+            mdl.fit(X[tr], y[tr])
+            errs.append(mean_squared_error(y[va], mdl.predict(X[va])))
         m = float(np.mean(errs))
-        if m < best_score:
-            best_score = m
-            best_alpha = a
-    model = Ridge(alpha=best_alpha, fit_intercept=False)
-    model.fit(X, y)
-    return model, best_alpha
+        if m < best_mse:
+            best_mse, best_a = m, a
+    mdl = Ridge(alpha=best_a, fit_intercept=False)
+    mdl.fit(X, y)
+    return mdl, best_a
 
-def nmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.sum((y_true - y_pred)**2) / (np.sum((y_true - np.mean(y_true))**2) + 1e-12))
+def nmse(y, yhat):
+    return float(np.sum((y - yhat)**2) / (np.sum((y - np.mean(y))**2) + 1e-12))
 
 # ==========================
-# MAIN PIPELINE
+# HARDWARE WRAPPERS (MINIMAL)
+# ==========================
+class RigolScope:
+    """Very small Rigol HDO reader: VAVG per channel, with a tiny fallback."""
+    def __init__(self, channels):
+        self.channels = channels
+        if SIMULATION_MODE:
+            self.rm = self.scope = None
+            return
+        self.rm = pyvisa.ResourceManager()
+        addr = self.rm.list_resources()[0]
+        self.scope = self.rm.open_resource(addr)
+        self.scope.timeout = 5000
+        self.scope.read_termination = '\n'
+        self.scope.write_termination = '\n'
+        _ = self.scope.query('*IDN?')
+        self.scope.write('*CLS')
+        self.scope.write(':RUN')
+        for ch in channels:
+            self.scope.write(f':CHANnel{ch}:DISPlay ON')
+            self.scope.write(f':CHANnel{ch}:SCALe 2')
+            self.scope.write(f':CHANnel{ch}:OFFSet 0')
+        try:
+            self.scope.write(':MEASure:STATe ON')
+        except Exception:
+            pass
+
+    def read_channel(self, ch):
+        if SIMULATION_MODE:
+            return float(2.0 + 0.05*np.random.randn())
+        s = self.scope
+        try:
+            s.write(':RUN')
+            return float(s.query(f':MEASure:ITEM? VAVG,CHANnel{ch}'))
+        except Exception:
+            # tiny generic fallback
+            try:
+                return float(s.query(f':MEASure:VAVerage? CHANnel{ch}'))
+            except Exception:
+                return np.nan
+
+    def read_many(self, avg=1):
+        vals = []
+        for ch in self.channels:
+            samples = []
+            for _ in range(max(1, avg)):
+                v = self.read_channel(ch)
+                if np.isfinite(v): samples.append(v)
+                time.sleep(0.002)
+            vals.append(float(np.mean(samples)) if samples else np.nan)
+        return np.array(vals, float)
+
+    def close(self):
+        if SIMULATION_MODE: return
+        try: self.scope.close()
+        except: pass
+        try: self.rm.close()
+        except: pass
+
+class HeaterBus:
+    """Serial sender for 'heater,value;...\\n' strings."""
+    def __init__(self):
+        if SIMULATION_MODE:
+            self.ser = None
+            return
+        self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
+        time.sleep(0.4)
+        self.ser.reset_input_buffer(); self.ser.reset_output_buffer()
+
+    def send(self, config: dict):
+        if SIMULATION_MODE: return
+        msg = "".join(f"{h},{float(v):.3f};" for h,v in config.items()) + "\n"
+        self.ser.write(msg.encode()); self.ser.flush()
+
+    def close(self):
+        if SIMULATION_MODE: return
+        try: self.ser.close()
+        except: pass
+
+# ==========================
+# RESERVOIR CORE (TINY)
+# ==========================
+class PhotonicReservoir:
+    def __init__(self, input_heaters, all_heaters, scope_channels):
+        self.input_heaters = list(input_heaters)
+        self.internal_heaters = [h for h in all_heaters if h not in self.input_heaters]
+        self.scope = RigolScope(scope_channels)
+        self.bus = HeaterBus()
+
+        # Fixed random mesh bias (to create mixing)
+        rng = np.random.default_rng(42)
+        self.mesh_bias = {
+            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 0.8), V_MIN, V_MAX))
+            for h in self.internal_heaters
+        }
+        # Input heater baseline
+        self.input_bias = {h: V_BIAS_INPUT for h in self.input_heaters}
+
+        # Input masks (fixed)
+        self.main_mask = rand_mask(len(self.input_heaters))
+        self.micro_masks = [rand_mask(len(self.input_heaters)) for _ in range(K_VIRTUAL)]
+
+        # Apply initial baseline so the chip is in a defined state
+        self.bus.send({**self.mesh_bias, **self.input_bias})
+        time.sleep(0.1)
+
+    def _compose_config(self, s_scalar, k_subslot):
+        cfg = dict(self.mesh_bias)
+        mm = self.main_mask
+        rr = self.micro_masks[k_subslot]
+        for i, h in enumerate(self.input_heaters):
+            v = self.input_bias[h] + MASK_GAIN*mm[i]*s_scalar + MICRO_MASK_GAIN*rr[i]
+            cfg[h] = float(np.clip(v, V_MIN, V_MAX))
+        return cfg
+
+    def drive(self, s):
+        """Return Z with shape (T, len(scope_channels)*K_VIRTUAL)."""
+        T = len(s)
+        D = len(SCOPE_CHANNELS) * K_VIRTUAL
+        Z = np.zeros((T, D), float)
+
+        for t in range(T):
+            for k in range(K_VIRTUAL):
+                self.bus.send(self._compose_config(float(s[t]), k))
+                time.sleep(SETTLE)
+                y = self.scope.read_many(avg=READ_AVG)
+                Z[t, k*len(SCOPE_CHANNELS):(k+1)*len(SCOPE_CHANNELS)] = y
+
+            # pad to total T_SYMBOL if needed
+            used = K_VIRTUAL * SETTLE
+            if T_SYMBOL > used:
+                time.sleep(T_SYMBOL - used)
+        return Z
+
+    def close(self):
+        self.scope.close()
+        self.bus.close()
+
+# ==========================
+# MAIN
 # ==========================
 def main():
-    cfg = ReservoirConfig(
-        input_heaters=INPUT_HEATERS,
-        internal_heaters=INTERNAL_HEATERS,
-        scope_channels=SCOPE_CHANNELS,
-        v_min=V_MIN, v_max=V_MAX,
-        v_bias=V_BIAS, v_input_bias=V_INPUT_BIAS,
-        mask_gain=MASK_GAIN, micro_mask_gain=MICRO_MASK_GAIN,
-        t_symbol=T_SYMBOL, k_virtual=K_VIRTUAL,
-        settle_per_subslot=SETTLE_PER_SUBSLOT,
-        read_avg_samples=READ_AVG_SAMPLES
-    )
+    # Build task sequences
+    if TASK == 'mackey_glass':
+        s_all = mackey_glass(TRAIN_STEPS + TEST_STEPS + WASHOUT + 10)
+        s_drive, target = s_all[:-1], s_all[1:]
+    elif TASK == 'narma10':
+        u, y = narma10(TRAIN_STEPS + TEST_STEPS + WASHOUT + 10)
+        s_drive, target = u, y
+    else:
+        raise ValueError("TASK must be 'mackey_glass' or 'narma10'")
 
-    res = PhotonicReservoir(cfg)
+    # Remove washout
+    s_drive = s_drive[WASHOUT:]
+    target  = target [WASHOUT:]
+
+    # Split
+    s_tr = s_drive[:TRAIN_STEPS]
+    y_tr = target [:TRAIN_STEPS]
+    s_te = s_drive[TRAIN_STEPS:TRAIN_STEPS+TEST_STEPS]
+    y_te = target [TRAIN_STEPS:TRAIN_STEPS+TEST_STEPS]
+
+    print(f"Reservoir run: TRAIN {len(s_tr)} | TEST {len(s_te)} | outs={len(SCOPE_CHANNELS)} | K={K_VIRTUAL}")
+
+    res = PhotonicReservoir(INPUT_HEATERS, ALL_HEATERS, SCOPE_CHANNELS)
 
     try:
-        # --------- Build task sequences ---------
-        if TASK == 'mackey_glass':
-            s_all = gen_mackey_glass(TRAIN_STEPS + TEST_STEPS + WASHOUT + 10)
-            # Input is s(t); target is s(t+1)
-            s_drive = s_all[:-1]
-            target = s_all[1:]
-        elif TASK == 'narma10':
-            u_all, y_all = gen_narma10(TRAIN_STEPS + TEST_STEPS + WASHOUT + 10)
-            s_drive = u_all  # drive is input u(t)
-            target = y_all   # target is y(t)
-        else:
-            raise ValueError("TASK must be 'mackey_glass' or 'narma10'")
-
-        # Trim washout
-        s_drive = s_drive[WASHOUT:]
-        target = target[WASHOUT:]
-
-        # Split train/test
-        s_train = s_drive[:TRAIN_STEPS]
-        y_train = target[:TRAIN_STEPS]
-        s_test  = s_drive[TRAIN_STEPS:TRAIN_STEPS+TEST_STEPS]
-        y_test  = target[TRAIN_STEPS:TRAIN_STEPS+TEST_STEPS]
-
-        print(f"Driving reservoir: TRAIN {len(s_train)} steps, TEST {len(s_test)} steps; outputs={NUM_OUTPUTS}, K={cfg.k_virtual}")
-
-        # --------- Drive & record ---------
         print("Collecting training features...")
-        Z_train = res.drive_sequence(s_train)
-        X_train = build_features(Z_train, quadratic=True)
+        Z_tr = res.drive(s_tr)
+        X_tr = build_features(Z_tr, quadratic=True)
 
         print("Collecting test features...")
-        Z_test = res.drive_sequence(s_test)
-        X_test = build_features(Z_test, quadratic=True)
+        Z_te = res.drive(s_te)
+        X_te = build_features(Z_te, quadratic=True)
 
-        # --------- Train readout ---------
-        print("Training ridge regression (with CV)...")
-        model, alpha = train_ridge(X_train, y_train)
-        print(f"Chosen alpha = {alpha}")
+        print("Training ridge...")
+        mdl, alpha = train_ridge(X_tr, y_tr)
+        print(f"alpha = {alpha}")
 
-        # --------- Evaluate ---------
-        y_pred_train = model.predict(X_train)
-        y_pred_test  = model.predict(X_test)
-        nmse_tr = nmse(y_train, y_pred_train)
-        nmse_te = nmse(y_test, y_pred_test)
-        print(f"Train NMSE: {nmse_tr:.4f}")
-        print(f"Test  NMSE: {nmse_te:.4f}")
-
-        # Small summary
-        print("\n--- SUMMARY ---")
-        print(f"Outputs: {NUM_OUTPUTS} | Virtual nodes: {cfg.k_virtual} | Features: {X_train.shape[1]}")
-        print(f"Task: {TASK} | Train NMSE: {nmse_tr:.4f} | Test NMSE: {nmse_te:.4f}")
+        yhat_tr = mdl.predict(X_tr)
+        yhat_te = mdl.predict(X_te)
+        print(f"NMSE train = {nmse(y_tr, yhat_tr):.4f}")
+        print(f"NMSE test  = {nmse(y_te, yhat_te):.4f}")
 
     except KeyboardInterrupt:
-        print("\nInterrupted by user.")
+        print("Interrupted.")
     finally:
-        res.cleanup()
+        res.close()
 
 if __name__ == "__main__":
     main()
