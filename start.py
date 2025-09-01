@@ -12,7 +12,7 @@ from sklearn.metrics import mean_squared_error
 # ==========================
 # USER CONFIG (EDIT THESE)
 # ==========================
-SERIAL_PORT = 'COM4'
+SERIAL_PORT = 'COM3'
 BAUD_RATE = 115200
 
 # Photodiode channels on your scope (1..4 or 1..7)
@@ -20,14 +20,14 @@ SCOPE_CHANNELS = [1, 2, 3, 4]   # change to [1,2,3,4,5,6,7] if you have 7 output
 NUM_OUTPUTS = len(SCOPE_CHANNELS)
 
 # Heaters you will modulate with the scalar input stream (1–7 heaters is fine)
-INPUT_HEATERS = [36, 37]        # you can add more, e.g., [34,35,36,37,38,39,40]
+INPUT_HEATERS = [32, 33, 34, 35, 36, 37]        # you can add more, e.g., [34,35,36,37,38,39,40]
 
 # All other tunable heaters used as fixed mesh bias (random offsets)
 ALL_HEATERS = list(range(40))   # edit if your address space is different
 INTERNAL_HEATERS = [h for h in ALL_HEATERS if h not in INPUT_HEATERS]
 
 # Safe voltage limits for heaters
-V_MIN = 0.10
+V_MIN = 0.20
 V_MAX = 4.90
 V_BIAS = 2.50                  # mid-bias for internal heaters
 V_INPUT_BIAS = 2.50            # mid-bias for input heaters
@@ -88,11 +88,13 @@ class PhotonicReservoir:
         self.micro_masks = [self._make_mask(len(cfg.input_heaters)) for _ in range(cfg.k_virtual)]
 
         # Fixed random biases for the internal heaters (mesh mixing)
-        rng = np.random.default_rng(42)
+        rng = np.random.default_rng()
         self.mesh_bias = {
-            h: float(np.clip(cfg.v_bias + rng.normal(0, 0.25), cfg.v_min, cfg.v_max))
+            h: float(np.clip(cfg.v_bias + rng.normal(0, 1.0), cfg.v_min, cfg.v_max))
             for h in cfg.internal_heaters
         }
+
+        print(self.mesh_bias)
 
         # Input heater biases
         self.input_bias = {h: cfg.v_input_bias for h in cfg.input_heaters}
@@ -124,13 +126,13 @@ class PhotonicReservoir:
 
         visa_addr = resources[0]  # or hardcode your HDO address
         print(f"[SCPI] Opening {visa_addr}")
-        scope = self.rm.open_resource(visa_addr)
-        scope.timeout = 5000
-        scope.read_termination = '\n'
-        scope.write_termination = '\n'
+        self.scope = self.rm.open_resource(visa_addr)
+        self.scope.timeout = 5000
+        self.scope.read_termination = '\n'
+        self.scope.write_termination = '\n'
 
         # Handshake
-        idn = scope.query('*IDN?').strip()
+        idn = self.scope.query('*IDN?').strip()
         print(f"[SCPI] *IDN? -> {idn}")
         if "RIGOL" not in idn.upper():
             print("[SCPI] Warning: Expected a Rigol HDO, but got:", idn)
@@ -138,18 +140,18 @@ class PhotonicReservoir:
         self.scope_vendor = "RIGOL"
 
         # Clear status & start acquisition
-        scope.write('*CLS')
+        self.scope.write('*CLS')
         try:
-            scope.write(':RUN')
+            self.scope.write(':RUN')
         except Exception:
             pass
 
         # Turn on the channels we’ll read and set scale/offset
         for ch in self.cfg.scope_channels:
             # Rigol accepts both CHANnelN and CHN
-            scope.write(f':CHANnel{ch}:DISPlay ON')
-            scope.write(f':CHANnel{ch}:SCALe 2')
-            scope.write(f':CHANnel{ch}:OFFSet 0')
+            self.scope.write(f':CHANnel{ch}:DISPlay ON')
+            self.scope.write(f':CHANnel{ch}:SCALe 2')
+            self.scope.write(f':CHANnel{ch}:OFFSet 0')
 
         # Optional: averaging helps noisy PDs (turn off if you want raw)
         # scope.write(':ACQuire:TYPE AVERage')
@@ -157,11 +159,10 @@ class PhotonicReservoir:
 
         # Enable measurement engine (some firmware requires STATe ON)
         try:
-            scope.write(':MEASure:STATe ON')
+            self.scope.write(':MEASure:STATe ON')
         except Exception:
             pass
 
-        return scope
 
 
     def _prime_scope(self):
