@@ -6,6 +6,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, classification_rep
 from sklearn.datasets import fetch_openml
 import matplotlib.pyplot as plt
 from scope import  RigolScope
+from sklearn.preprocessing import StandardScaler
 
 """
 MNIST Digit Classification using Photonic Reservoir Computing
@@ -28,7 +29,7 @@ V_BIAS_INPUT = 2.50
 
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
 T_SETTLE = 0.2          # Time to let spatial pattern develop
-K_VIRTUAL = 4            # Still use virtual nodes for feature diversity
+K_VIRTUAL = 1            # Still use virtual nodes for feature diversity
 SETTLE = 0.05            # Faster sampling for spatial patterns, how ofter we measure the nodes
 READ_AVG = 1             # Fewer averages needed
 
@@ -44,6 +45,7 @@ TEST_FRACTION = 0.2      # 20% for testing
 # DATA LOADING AND PREPROCESSING
 # ==========================
 
+
 def load_mnist_data(n_samples_per_class=50):
     print("Loading MNIST dataset...")
     try:
@@ -56,16 +58,30 @@ def load_mnist_data(n_samples_per_class=50):
         
         print(f"Full MNIST dataset: {X.shape[0]} samples")
         
-        # Sample balanced subset
-        X_subset, y_subset = create_balanced_subset(X, y, n_samples_per_class)
+        # Reshape images to 7x7 (49 pixels) by downsampling
+        X_resized = []
+        for img in X:
+            # Reshape to a 28x28 grid
+            img_2d = img.reshape(28, 28)
+            # Reshape for downsampling to 7x7 (4x4 blocks)
+            img_downsampled = img_2d.reshape(7, 4, 7, 4).mean(axis=(1, 3))
+            # Flatten back to a 1D array and append
+            X_resized.append(img_downsampled.flatten())
+
+        X_resized = np.array(X_resized)
         
-        print(f"Using subset: {len(X_subset)} samples ({n_samples_per_class} per digit)")
+        # Sample balanced subset from the resized dataset
+        X_subset, y_subset = create_balanced_subset(X_resized, y, n_samples_per_class)
+        
+        print(f"Using resized subset: {len(X_subset)} samples ({n_samples_per_class} per digit)")
         return X_subset, y_subset
         
     except Exception as e:
         print(f"Error loading MNIST: {e}")
-
-
+        import traceback
+        traceback.print_exc()
+        return None, None
+        
 def create_balanced_subset(X, y, n_per_class):
     """Create balanced subset with n_per_class samples of each digit."""
     X_subset = []
@@ -88,7 +104,6 @@ def create_balanced_subset(X, y, n_per_class):
     y_subset = np.array(y_subset)[indices]
     
     return X_subset, y_subset
-
 # ==========================
 # FUNCTIONS
 # ==========================
@@ -121,7 +136,12 @@ class HeaterBus:
         self.ser.reset_output_buffer()
 
     def send(self, config):
-        print(config)
+          # Create a new dictionary with standard Python floats for printing
+        # printable_config = {
+        #     heater: float(value) for heater, value in config.items()
+        # }
+        # print(printable_config)
+        
         voltage_message = "".join(f"{heater},{value};" for heater, value in config.items()) + '\n'
         self.ser.write(voltage_message.encode())
         self.ser.flush()
@@ -224,63 +244,83 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         super().__init__(input_heaters, all_heaters, scope_channels)
         print("[MNIST] Photonic reservoir initialized for spatial classification")
     
-    def process_spatial_pattern(self, image_pixels, encoding_method='advanced'):
+    def process_spatial_pattern(self, image_pixels):
         """
-        Process a single spatial pattern (image) through the reservoir.
-        Returns feature vector for classification.
+        Process a single image by chunking its pixels and scanning them sequentially.
+        This method leverages the reservoir's temporal dynamics.
         """
-        heater_voltages = encode_image_advanced(image_pixels)
-
-        # Create full configuration
-        config = {}
-        for i, heater in enumerate(self.input_heaters):
-            config[heater] = round(float(heater_voltages[i]),2)
+        reservoir_features = []
         
-        # Apply spatial pattern and let it develop
-        self.bus.send(config)
-        time.sleep(T_SETTLE)  # Let thermal pattern develop
+        # The number of input heaters determines the chunk size for each time step.
+        chunk_size = len(self.input_heaters)
         
-        # Collect features using virtual nodes (temporal multiplexing)
-        features = []
-        for k in range(K_VIRTUAL):
-            time.sleep(SETTLE)  # Small delay between samples
+        # Since the image is now 7x7 (49 pixels), the number of chunks is 49 // 7 = 7.
+        num_chunks = len(image_pixels) // chunk_size
+        
+        # Iterate through all chunks of the resized image.
+        for i in range(num_chunks):
+            # Get the current chunk of pixels.
+            chunk_start = i * chunk_size
+            chunk_end = chunk_start + chunk_size
+            pixel_chunk = image_pixels[chunk_start:chunk_end]
+            
+            # Map the pixel values to the input heaters.
+            input_voltages = [
+                V_MIN + (V_MAX - V_MIN) * pixel_value
+                for pixel_value in pixel_chunk
+            ]
+            
+            # Create a dictionary to hold the heater configuration.
+            config = {
+                heater: round(voltage, 2)
+                for heater, voltage in zip(self.input_heaters, input_voltages)
+            }
+            
+            # Send the voltage configuration to the heaters.
+            self.bus.send(config)
+            
+            # Allow the system to settle and evolve.
+            time.sleep(T_SETTLE)
+            
+            # Read the state of the reservoir from the photodetectors.
             pd_reading = self.scope.read_many(avg=READ_AVG)
-            features.extend(pd_reading)
-    
-        return np.array(features)
-    
+            reservoir_features.append(pd_reading)
+
+        # Flatten the list of readings into a single feature vector.
+        # The length of this vector will be (7 chunks * 4 channels) = 28 features.
+        return np.array(reservoir_features).flatten()
+
     def process_dataset(self, X_images, y_labels, phase_name="PROCESSING"):
         """
         Process entire dataset through the reservoir.
         """
         print(f"[{phase_name}] Processing {len(X_images)} images...")
-        
+
         X_features = []
         processed_labels = []
-        
+
         for i, (image, label) in enumerate(zip(X_images, y_labels)):
             if (i + 1) % 50 == 0:
                 print(f"[{phase_name}] Processed {i+1}/{len(X_images)} images")
-            
+
             try:
                 features = self.process_spatial_pattern(image)
-                X_features.append(features)
-                processed_labels.append(label)
-                
-                # # Debug info for first few samples
-                # if i < 3:
-                #     print(f"[DEBUG] Image {i} (digit {label}): features shape {features.shape}")
-                #     print(f"         Feature range: {features.min():.3f} to {features.max():.3f}")
-                
+                # Check for NaNs and skip if found
+                if not np.any(np.isnan(features)):
+                    X_features.append(features)
+                    processed_labels.append(label)
+                else:
+                    print(f"[WARNING] Skipping image {i} due to NaN values in features.")
+
             except Exception as e:
                 print(f"[ERROR] Failed to process image {i}: {e}")
                 continue
-        
+
         X_features = np.array(X_features)
         processed_labels = np.array(processed_labels)
-        
+
         print(f"[{phase_name}] Completed: {X_features.shape[0]} samples, {X_features.shape[1]} features")
-        
+
         return X_features, processed_labels
 
 # ==========================
