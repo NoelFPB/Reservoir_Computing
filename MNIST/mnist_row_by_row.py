@@ -17,7 +17,7 @@ MNIST Digit Classification using Photonic Reservoir Computing
 # CONFIG
 # ==========================
 SERIAL_PORT = 'COM3'
-BAUD_RATE = 112500
+BAUD_RATE = 115200
 
 SCOPE_CHANNELS = [1, 2, 3, 4]
 INPUT_HEATERS = [33, 34, 35, 36, 37, 38, 39]
@@ -38,9 +38,9 @@ SPATIAL_GAIN = 5.0       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
-
+      
 # ==========================
 # DATA LOADING AND PREPROCESSING
 # ==========================
@@ -352,9 +352,10 @@ def build_features_classification(Z, quadratic=True, interaction=True):
     
     return np.hstack(features)
 
+
 def train_mnist_classifier(X_features, y_labels):
     """
-    Train multi-class classifier for MNIST digits.
+    Train multi-class classifier for MNIST digits with data scaling.
     """
     print("\nTraining MNIST classifier...")
     
@@ -371,6 +372,19 @@ def train_mnist_classifier(X_features, y_labels):
     print(f"Training set: {len(X_train)} samples")
     print(f"Test set: {len(X_test)} samples")
     
+    # --- Data Scaling Implementation ---
+    # Initialize the scaler
+    scaler = StandardScaler()
+    
+    # Fit the scaler on the training data and transform it
+    X_train_scaled = scaler.fit_transform(X_train)
+    
+    # Use the same scaler to transform the test data
+    X_test_scaled = scaler.transform(X_test)
+
+    # Note: For cross-validation, the scaler must be applied inside the CV loop
+    # or a pipeline should be used to prevent data leakage.
+    
     # Try different classifiers
     classifiers = {
         'Logistic Regression': LogisticRegression(max_iter=10000, random_state=42),
@@ -380,32 +394,39 @@ def train_mnist_classifier(X_features, y_labels):
     results = {}
     
     for name, classifier in classifiers.items():
-        print(f"\nTraining {name}...")
-        
-        # Train
-        classifier.fit(X_train, y_train)
-        
-        # Evaluate
-        train_score = classifier.score(X_train, y_train)
-        test_score = classifier.score(X_test, y_test)
-        
-        # Predictions for detailed analysis
-        y_pred = classifier.predict(X_test)
-        
-        results[name] = {
-            'classifier': classifier,
-            'train_accuracy': train_score,
-            'test_accuracy': test_score,
-            'y_pred': y_pred
-        }
-        
-        print(f"{name} Results:")
-        print(f"  Training accuracy: {train_score:.3f}")
-        print(f"  Test accuracy: {test_score:.3f}")
-        
-        # Cross-validation
-        cv_scores = cross_val_score(classifier, X_expanded, y_labels, cv=5)
-        print(f"  Cross-validation: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+            print(f"\nTraining {name}...")
+            
+            # Train on scaled data
+            classifier.fit(X_train_scaled, y_train)
+            
+            # Evaluate on scaled data
+            train_score = classifier.score(X_train_scaled, y_train)
+            test_score = classifier.score(X_test_scaled, y_test)
+            
+            # Predictions for detailed analysis
+            y_pred = classifier.predict(X_test_scaled)
+            
+            # Fix for Ridge Classifier: Convert continuous output to integer labels
+            if name == 'Ridge Classifier':
+                y_pred = np.rint(y_pred).astype(int) # rounds and casts to int
+                
+            results[name] = {
+                'classifier': classifier,
+                'train_accuracy': train_score,
+                'test_accuracy': test_score,
+                'y_pred': y_pred
+            }
+            
+            print(f"{name} Results:")
+            print(f"  Training accuracy: {train_score:.3f}")
+            print(f"  Test accuracy: {test_score:.3f}")
+            
+            # Cross-validation
+            # Using a pipeline to correctly scale data within each fold
+            from sklearn.pipeline import make_pipeline
+            pipeline = make_pipeline(StandardScaler(), classifier)
+            cv_scores = cross_val_score(pipeline, X_expanded, y_labels, cv=5)
+            print(f"  Cross-validation: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
     
     # Select best classifier
     best_name = max(results.keys(), key=lambda k: results[k]['test_accuracy'])

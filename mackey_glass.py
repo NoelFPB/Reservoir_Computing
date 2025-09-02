@@ -21,7 +21,7 @@ Edit the CONFIG section only.
 # CONFIG (EDIT THESE)
 # ==========================
 SERIAL_PORT = 'COM3'
-BAUD_RATE = 112500
+BAUD_RATE = 115200
 
 # Scope: Rigol HDO1074 channels wired to your PDs (choose 4 or 7, etc.)
 SCOPE_CHANNELS = [1, 2, 3, 4]

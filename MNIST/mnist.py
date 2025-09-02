@@ -16,7 +16,7 @@ MNIST Digit Classification using Photonic Reservoir Computing
 # CONFIG
 # ==========================
 SERIAL_PORT = 'COM3'
-BAUD_RATE = 112500
+BAUD_RATE = 115200
 
 SCOPE_CHANNELS = [1, 2, 3, 4]
 INPUT_HEATERS = [33, 34, 35, 36, 37, 38, 39]
