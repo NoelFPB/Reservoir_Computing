@@ -5,6 +5,7 @@ from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, mean_squared_error
 from sklearn.datasets import fetch_openml
 import matplotlib.pyplot as plt
+from scope import  RigolScope
 
 """
 MNIST Digit Classification using Photonic Reservoir Computing
@@ -46,20 +47,18 @@ V_BIAS_INTERNAL = 2.50
 V_BIAS_INPUT = 2.50
 
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
-T_SETTLE = 0.15          # Time to let spatial pattern develop
+T_SETTLE = 0.2          # Time to let spatial pattern develop
 K_VIRTUAL = 4            # Still use virtual nodes for feature diversity
-SETTLE = 0.04            # Faster sampling for spatial patterns
-READ_AVG = 2             # Fewer averages needed
+SETTLE = 0.05            # Faster sampling for spatial patterns, how ofter we measure the nodes
+READ_AVG = 1             # Fewer averages needed
 
 # Spatial encoding parameters
-SPATIAL_GAIN = 2.0       # How strongly pixels drive heaters
-NOISE_LEVEL = 0.1        # Add slight randomization to prevent overfitting
+SPATIAL_GAIN = 5.0       # How strongly pixels drive heaters
+NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 40 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
-
-SIMULATION_MODE = False  # Set True for testing without hardware
 
 # ==========================
 # DATA LOADING AND PREPROCESSING
@@ -148,128 +147,23 @@ def generate_synthetic_digits(n_per_class):
 # HARDWARE CLASSES (from original reservoir code)
 # ==========================
 
-class RigolScope:
-    """Very small Rigol HDO reader using MEASure commands."""
-    def __init__(self, channels):
-        self.channels = channels
-        if SIMULATION_MODE:
-            self.rm = self.scope = None
-            print("[DEBUG] Scope in SIMULATION_MODE - will return random values")
-            return
-        
-        print("[DEBUG] Connecting to Rigol scope...")
-        self.rm = pyvisa.ResourceManager()
-        addr = self.rm.list_resources()[0]
-        print(f"[DEBUG] Found scope at: {addr}")
-        self.scope = self.rm.open_resource(addr)
-        self.scope.timeout = 5000
-        self.scope.read_termination = '\n'
-        self.scope.write_termination = '\n'
-        
-        # Get scope ID for verification
-        try:
-            idn = self.scope.query('*IDN?')
-            print(f"[DEBUG] Scope ID: {idn.strip()}")
-        except Exception as e:
-            print(f"[DEBUG] ERROR querying scope ID: {e}")
-        
-        # Clear and configure scope
-        self.scope.write('*CLS')
-        self.scope.write(':RUN')
-        
-        for ch in channels:
-            self.scope.write(f':CHANnel{ch}:DISPlay ON')
-            self.scope.write(f':CHANnel{ch}:SCALe 2')
-            self.scope.write(f':CHANnel{ch}:OFFSet 0')
-        
-        try:
-            self.scope.write(':MEASure:STATe ON')
-        except Exception as e:
-            print(f"[DEBUG] Warning: Could not enable measurement system: {e}")
-    
-    def read_channel(self, ch):
-        """Read a single channel using MEASure command."""
-        if SIMULATION_MODE:
-            base = 2.0 + 0.3 * np.sin(time.time() * 2 + ch)
-            noise = 0.05 * np.random.randn()
-            return float(base + noise)
-        
-        try:
-            measurement_types = ['VAVG', 'VMEAN', 'VMAX']
-            
-            for meas_type in measurement_types:
-                try:
-                    query = f':MEASure:STATistic:ITEM? CURRent,{meas_type},CHANnel{ch}'
-                    value = float(self.scope.query(query))
-                    
-                    if not np.isnan(value) and -10 <= value <= 10:
-                        return round(value, 5)
-                    
-                except Exception:
-                    continue
-            
-            return np.nan
-            
-        except Exception as e:
-            print(f"[SCPI] Error reading channel {ch}: {e}")
-            return np.nan
-
-    def read_many(self, avg=1):
-        """Read all channels with averaging."""
-        vals = []
-        for ch in self.channels:
-            samples = []
-            for i in range(max(1, avg)):
-                v = self.read_channel(ch)
-                if np.isfinite(v): 
-                    samples.append(v)
-                time.sleep(0.002)
-            
-            if samples:
-                vals.append(float(np.mean(samples)))
-            else:
-                vals.append(np.nan)
-        
-        return np.array(vals, float)
-
-    def close(self):
-        if SIMULATION_MODE: 
-            return
-        try: 
-            self.scope.close()
-        except: 
-            pass
-        try: 
-            self.rm.close()
-        except: 
-            pass
-
 class HeaterBus:
     """Serial sender for 'heater,value;...\\n' strings."""
     def __init__(self):
-        if SIMULATION_MODE:
-            self.ser = None
-            print("[DEBUG] HeaterBus in SIMULATION_MODE")
-            return
         
         print(f"[DEBUG] Connecting to serial port {SERIAL_PORT}...")
         self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
-        time.sleep(0.4)
+        time.sleep(0.2)
         self.ser.reset_input_buffer()
         self.ser.reset_output_buffer()
 
     def send(self, config: dict):
         msg = "".join(f"{h},{float(v):.3f};" for h,v in config.items()) + "\n"
         
-        if SIMULATION_MODE: 
-            return
-            
         self.ser.write(msg.encode())
         self.ser.flush()
 
     def close(self):
-        if SIMULATION_MODE: 
-            return
         try: 
             self.ser.close()
         except: 
@@ -284,11 +178,13 @@ class PhotonicReservoir:
         self.bus = HeaterBus()
 
         # Fixed random mesh bias
-        rng = np.random.default_rng(42)
+        rng = np.random.default_rng()
         self.mesh_bias = {
-            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 2), V_MIN, V_MAX))
+            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 1.5), V_MIN, V_MAX))
             for h in self.internal_heaters
         }
+
+        print(self.mesh_bias)
         
         # Input heater baseline
         self.input_bias = {h: V_BIAS_INPUT for h in self.input_heaters}

@@ -146,7 +146,7 @@ class RigolScope:
         for ch in channels:
             self.scope.write(f':CHANnel{ch}:DISPlay ON')
             self.scope.write(f':CHANnel{ch}:SCALe 2')
-            self.scope.write(f':CHANnel{ch}:OFFSet 0')
+            self.scope.write(f':CHANnel{ch}:OFFSet -6')
             print(f"[DEBUG] Configured channel {ch}")
         
         # Enable measurement system
