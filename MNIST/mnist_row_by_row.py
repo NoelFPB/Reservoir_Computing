@@ -7,6 +7,7 @@ from sklearn.datasets import fetch_openml
 import matplotlib.pyplot as plt
 from scope import  RigolScope
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
 
 """
 MNIST Digit Classification using Photonic Reservoir Computing
@@ -386,10 +387,21 @@ def train_mnist_classifier(X_features, y_labels):
     # or a pipeline should be used to prevent data leakage.
     
     # Try different classifiers
+    # classifiers = {
+    #     'Logistic Regression': LogisticRegression(max_iter=10000, random_state=42),
+    #     'Ridge Classifier': Ridge(alpha=1.0)
+    # }
+
     classifiers = {
-        'Logistic Regression': LogisticRegression(max_iter=10000, random_state=42),
-        'Ridge Classifier': Ridge(alpha=1.0)
-    }
+        'Logistic Regression': LogisticRegression(
+            max_iter=10000,
+            random_state=42,
+            multi_class='multinomial',  # multinomial handles >2 classes properly
+            solver='lbfgs'              # good for multinomial
+        ),
+        'Ridge Classifier': RidgeClassifier(alpha=1.0, random_state=42)
+}
+
     
     results = {}
     
@@ -406,9 +418,9 @@ def train_mnist_classifier(X_features, y_labels):
             # Predictions for detailed analysis
             y_pred = classifier.predict(X_test_scaled)
             
-            # Fix for Ridge Classifier: Convert continuous output to integer labels
-            if name == 'Ridge Classifier':
-                y_pred = np.rint(y_pred).astype(int) # rounds and casts to int
+            # # Fix for Ridge Classifier: Convert continuous output to integer labels
+            # if name == 'Ridge Classifier':
+            #     y_pred = np.rint(y_pred).astype(int) # rounds and casts to int
                 
             results[name] = {
                 'classifier': classifier,
