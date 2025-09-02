@@ -10,30 +10,10 @@ from scope import  RigolScope
 """
 MNIST Digit Classification using Photonic Reservoir Computing
 
-Takes the same hardware used for Mackey-Glass prediction and adapts it 
-for handwritten digit recognition (0-9 classification).
-
-Key insight: Same physical reservoir, different interpretation!
 """
 
 # ==========================
-# HELPER FUNCTIONS (from original reservoir code)
-# ==========================
-
-def rand_mask(n):
-    """Balanced ±1 mask of length n."""
-    m = np.ones(n)
-    m[np.random.choice(n, size=n//2, replace=False)] = -1
-    return m
-
-def build_features(Z, quadratic=True):
-    """Features = [1, Z, Z^2] (or [1, Z])."""
-    if quadratic:
-        return np.hstack([np.ones((len(Z),1)), Z, Z**2])
-    return np.hstack([np.ones((len(Z),1)), Z])
-
-# ==========================
-# CONFIG (Same as before)
+# CONFIG
 # ==========================
 SERIAL_PORT = 'COM3'
 BAUD_RATE = 112500
@@ -49,7 +29,7 @@ V_BIAS_INPUT = 2.50
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
 T_SETTLE = 0.2          # Time to let spatial pattern develop
 K_VIRTUAL = 4            # Still use virtual nodes for feature diversity
-SETTLE = 0.05            # Faster sampling for spatial patterns, how ofter we measure the nodes
+SETTLE = 0.075            # Faster sampling for spatial patterns, how ofter we measure the nodes
 READ_AVG = 1             # Fewer averages needed
 
 # Spatial encoding parameters
@@ -57,7 +37,7 @@ SPATIAL_GAIN = 5.0       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 40 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
 
 # ==========================
@@ -65,9 +45,7 @@ TEST_FRACTION = 0.2      # 20% for testing
 # ==========================
 
 def load_mnist_data(n_samples_per_class=50):
-    """Load and preprocess MNIST data."""
     print("Loading MNIST dataset...")
-    
     try:
         # Load MNIST from sklearn
         mnist = fetch_openml('mnist_784', version=1, parser='auto')
@@ -86,8 +64,7 @@ def load_mnist_data(n_samples_per_class=50):
         
     except Exception as e:
         print(f"Error loading MNIST: {e}")
-        print("Generating synthetic digit-like data for demo...")
-        return generate_synthetic_digits(n_samples_per_class)
+
 
 def create_balanced_subset(X, y, n_per_class):
     """Create balanced subset with n_per_class samples of each digit."""
@@ -112,56 +89,45 @@ def create_balanced_subset(X, y, n_per_class):
     
     return X_subset, y_subset
 
-def generate_synthetic_digits(n_per_class):
-    """Generate synthetic digit-like patterns for testing."""
-    print("Generating synthetic digit data...")
-    
-    X_synthetic = []
-    y_synthetic = []
-    
-    for digit in range(10):
-        for _ in range(n_per_class):
-            # Create simple digit-like patterns
-            pattern = np.zeros(784)  # 28x28 flattened
-            
-            if digit == 0:  # Circle-like
-                pattern[200:250] = np.random.uniform(0.5, 1.0, 50)
-                pattern[500:550] = np.random.uniform(0.5, 1.0, 50)
-            elif digit == 1:  # Vertical line
-                pattern[100:200:10] = np.random.uniform(0.7, 1.0, 10)
-            # ... (can add more patterns)
-            else:  # Random pattern for other digits
-                random_indices = np.random.choice(784, size=50, replace=False)
-                pattern[random_indices] = np.random.uniform(0.3, 1.0, 50)
-            
-            # Add noise
-            pattern += np.random.normal(0, 0.1, 784)
-            pattern = np.clip(pattern, 0, 1)
-            
-            X_synthetic.append(pattern)
-            y_synthetic.append(digit)
-    
-    return np.array(X_synthetic), np.array(y_synthetic)
+# ==========================
+# FUNCTIONS
+# ==========================
+
+def rand_mask(n):
+    """Balanced ±1 mask of length n."""
+    m = np.ones(n)
+    m[np.random.choice(n, size=n//2, replace=False)] = -1
+    return m
+
+def build_features(Z, quadratic=True):
+    """Features = [1, Z, Z^2] (or [1, Z])."""
+    if quadratic:
+        return np.hstack([np.ones((len(Z),1)), Z, Z**2])
+    return np.hstack([np.ones((len(Z),1)), Z])
+
 
 # ==========================
-# HARDWARE CLASSES (from original reservoir code)
+# CLASSES
 # ==========================
 
 class HeaterBus:
     """Serial sender for 'heater,value;...\\n' strings."""
     def __init__(self):
         
-        print(f"[DEBUG] Connecting to serial port {SERIAL_PORT}...")
+        print(f"Connecting to serial port {SERIAL_PORT}...")
         self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
         time.sleep(0.2)
         self.ser.reset_input_buffer()
         self.ser.reset_output_buffer()
 
-    def send(self, config: dict):
-        msg = "".join(f"{h},{float(v):.3f};" for h,v in config.items()) + "\n"
-        
-        self.ser.write(msg.encode())
+    def send(self, config):
+        print(config)
+        voltage_message = "".join(f"{heater},{value};" for heater, value in config.items()) + '\n'
+        self.ser.write(voltage_message.encode())
         self.ser.flush()
+        time.sleep(0.01)
+        self.ser.reset_input_buffer()
+        self.ser.reset_output_buffer()
 
     def close(self):
         try: 
@@ -180,7 +146,7 @@ class PhotonicReservoir:
         # Fixed random mesh bias
         rng = np.random.default_rng()
         self.mesh_bias = {
-            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 1.5), V_MIN, V_MAX))
+            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 2.5), V_MIN, V_MAX))
             for h in self.internal_heaters
         }
 
@@ -204,32 +170,6 @@ class PhotonicReservoir:
 # ==========================
 # SPATIAL ENCODING
 # ==========================
-
-def encode_image_to_heaters(image_pixels):
-    """
-    Convert 784 pixel values to 7 heater voltages.
-    Uses spatial pooling and random projections.
-    """
-    # Method 1: Spatial pooling - divide image into regions
-    heater_values = []
-    pixels_per_heater = len(image_pixels) // len(INPUT_HEATERS)
-    
-    for i in range(len(INPUT_HEATERS)):
-        start_idx = i * pixels_per_heater
-        end_idx = start_idx + pixels_per_heater
-        
-        # Average pixel intensity in this region
-        region_intensity = np.mean(image_pixels[start_idx:end_idx])
-        
-        # Convert to heater voltage with noise for regularization
-        base_voltage = V_BIAS_INPUT + SPATIAL_GAIN * (region_intensity - 0.5)
-        noise = np.random.normal(0, NOISE_LEVEL)
-        heater_voltage = base_voltage + noise
-        
-        # Clip to safe range
-        heater_values.append(np.clip(heater_voltage, V_MIN, V_MAX))
-    
-    return heater_values
 
 def encode_image_advanced(image_pixels):
     """
@@ -261,7 +201,9 @@ def encode_image_advanced(image_pixels):
         region_intensity = np.mean(region)
         
         # Convert to voltage
-        heater_voltage = V_BIAS_INPUT + SPATIAL_GAIN * (region_intensity - 0.5)
+        #heater_voltage = V_BIAS_INPUT + SPATIAL_GAIN * (region_intensity - 0.5)
+        
+        heater_voltage = V_MIN + (V_MAX - V_MIN) * region_intensity
         heater_voltage += np.random.normal(0, NOISE_LEVEL)  # Regularization
         
         heater_values.append(np.clip(heater_voltage, V_MIN, V_MAX))
@@ -269,7 +211,7 @@ def encode_image_advanced(image_pixels):
     return heater_values
 
 # ==========================
-# PHOTONIC RESERVOIR (Modified for Spatial Processing)
+# PHOTONIC RESERVOIR
 # ==========================
 
 class PhotonicReservoirMNIST(PhotonicReservoir):
@@ -287,16 +229,12 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         Process a single spatial pattern (image) through the reservoir.
         Returns feature vector for classification.
         """
-        # Encode image to heater pattern
-        if encoding_method == 'advanced':
-            heater_voltages = encode_image_advanced(image_pixels)
-        else:
-            heater_voltages = encode_image_to_heaters(image_pixels)
-        
+        heater_voltages = encode_image_advanced(image_pixels)
+
         # Create full configuration
-        config = dict(self.mesh_bias)  # Internal mesh stays random
+        config = {}
         for i, heater in enumerate(self.input_heaters):
-            config[heater] = heater_voltages[i]
+            config[heater] = round(float(heater_voltages[i]),2)
         
         # Apply spatial pattern and let it develop
         self.bus.send(config)
@@ -307,8 +245,9 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         for k in range(K_VIRTUAL):
             time.sleep(SETTLE)  # Small delay between samples
             pd_reading = self.scope.read_many(avg=READ_AVG)
+            print(pd_reading)
             features.extend(pd_reading)
-        
+    
         return np.array(features)
     
     def process_dataset(self, X_images, y_labels, phase_name="PROCESSING"):
@@ -329,10 +268,10 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
                 X_features.append(features)
                 processed_labels.append(label)
                 
-                # Debug info for first few samples
-                if i < 3:
-                    print(f"[DEBUG] Image {i} (digit {label}): features shape {features.shape}")
-                    print(f"         Feature range: {features.min():.3f} to {features.max():.3f}")
+                # # Debug info for first few samples
+                # if i < 3:
+                #     print(f"[DEBUG] Image {i} (digit {label}): features shape {features.shape}")
+                #     print(f"         Feature range: {features.min():.3f} to {features.max():.3f}")
                 
             except Exception as e:
                 print(f"[ERROR] Failed to process image {i}: {e}")
@@ -350,9 +289,6 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
 # ==========================
 
 def build_features_classification(Z, quadratic=True, interaction=True):
-    """
-    Enhanced feature building for classification.
-    """
     # Make sure Z is 2D
     if Z.ndim == 1:
         Z = Z.reshape(1, -1)
@@ -596,30 +532,9 @@ def main_mnist():
         except:
             pass
 
-def demo_single_digit():
-    """
-    Quick demo classifying a single digit.
-    """
-    print("Quick single-digit classification demo...")
-    
-    # Generate or load a single digit
-    X_demo, y_demo = load_mnist_data(1)  # Just one sample
-    
-    if len(X_demo) > 0:
-        reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS, SCOPE_CHANNELS)
-        
-        print(f"Processing digit {y_demo[0]}...")
-        features = reservoir.process_spatial_pattern(X_demo[0])
-        
-        print(f"Reservoir response: {len(features)} features")
-        print(f"Feature range: {features.min():.3f} to {features.max():.3f}")
-        print(f"Feature std: {features.std():.3f}")
         
         reservoir.close()
 
-if __name__ == "__main__":
-    # For quick testing, run single digit demo
-    # demo_single_digit()
-    
+if __name__ == "__main__":  
     # For full MNIST classification
     main_mnist()
