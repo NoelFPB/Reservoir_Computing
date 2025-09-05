@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
+from scope import RigolScope
 """
 Minimal photonic reservoir controller (Rigol HDO1074 + serial heaters)
 WITH DEBUG PRINTS to understand what's happening
@@ -110,175 +111,24 @@ def nmse(y, yhat):
 # ==========================
 # HARDWARE WRAPPERS (MINIMAL)
 # ==========================
-class RigolScope:
-    """Very small Rigol HDO reader using MEASure commands."""
-    def __init__(self, channels):
-        self.channels = channels
-
-        print("[DEBUG] Connecting to Rigol scope...")
-        self.rm = pyvisa.ResourceManager()
-        addr = self.rm.list_resources()[0]
-        print(f"[DEBUG] Found scope at: {addr}")
-        self.scope = self.rm.open_resource(addr)
-        self.scope.timeout = 5000
-        self.scope.read_termination = '\n'
-        self.scope.write_termination = '\n'
-        
-        # Get scope ID for verification
-        try:
-            idn = self.scope.query('*IDN?')
-            print(f"[DEBUG] Scope ID: {idn.strip()}")
-        except Exception as e:
-            print(f"[DEBUG] ERROR querying scope ID: {e}")
-        
-        # Clear and configure scope
-        self.scope.write('*CLS')
-        self.scope.write(':RUN')  # Make sure scope is running
-        
-        # Configure channels
-        for ch in channels:
-            self.scope.write(f':CHANnel{ch}:DISPlay ON')
-            self.scope.write(f':CHANnel{ch}:SCALe 2')
-            self.scope.write(f':CHANnel{ch}:OFFSet -6')
-            print(f"[DEBUG] Configured channel {ch}")
-        
-        # Enable measurement system
-        try:
-            self.scope.write(':MEASure:STATe ON')
-            print("[DEBUG] Measurement system enabled")
-        except Exception as e:
-            print(f"[DEBUG] Warning: Could not enable measurement system: {e}")
-    
-    def read_channel(self, ch):
-        """Read a single channel using MEASure command."""
-        try:
-            # Try different measurement types in order of preference
-            measurement_types = ['VAVG', 'VMEAN', 'VMAX']  # Average, Mean, or Max
-            
-            for meas_type in measurement_types:
-                try:
-                    query = f':MEASure:STATistic:ITEM? CURRent,{meas_type},CHANnel{ch}'
-                    value = float(self.scope.query(query))
-                    
-                    # Check if we got a reasonable voltage reading
-                    if not np.isnan(value) and -10 <= value <= 10:  # Reasonable voltage range
-                        return round(value, 5)
-                    
-                except Exception as e:
-                    print(f"[DEBUG] {meas_type} measurement failed for CH{ch}: {e}")
-                    continue
-            
-            # If all measurement types failed, try the waveform method as backup
-            print(f"[DEBUG] All MEASure commands failed for CH{ch}, trying waveform method...")
-            return self._read_waveform_mean_backup(ch)
-            
-        except Exception as e:
-            print(f"[SCPI] Error reading channel {ch}: {e}")
-            return np.nan
-    
-    def _read_waveform_mean_backup(self, ch: int) -> float:
-        """Backup waveform reading method if MEASure fails."""
-        s = self.scope
-        try:
-            # Set source & format
-            s.write(f':WAVeform:SOURce CHANnel{ch}')
-            s.write(':WAVeform:FORMat BYTE')
-            s.write(':WAVeform:MODE NORMal')
-            
-            # Get scaling from preamble
-            pre = s.query(':WAVeform:PREamble?').strip()
-            print(f"[DEBUG] Ch{ch} preamble: {pre[:100]}...")  # Debug info
-            
-            fields = pre.split(',')
-            if len(fields) < 10:
-                print(f"[DEBUG] Incomplete preamble for CH{ch}: {len(fields)} fields")
-                return np.nan
-                
-            y_incr = float(fields[7])  # Voltage increment
-            y_orig = float(fields[8])  # Voltage origin
-            y_ref = float(fields[9]) if len(fields) > 9 else 0.0  # Reference
-            
-            print(f"[DEBUG] Ch{ch} scaling: incr={y_incr}, orig={y_orig}, ref={y_ref}")
-            
-            # Fetch raw bytes
-            raw = s.query_binary_values(':WAVeform:DATA?', datatype='B', is_big_endian=False)
-            print(f"[DEBUG] Ch{ch} got {len(raw)} data points, first 10: {raw[:10]}")
-            
-            if len(raw) == 0:
-                print(f"[DEBUG] No waveform data for CH{ch}")
-                return np.nan
-            
-            data = np.array(raw, dtype=np.float64)
-            
-            # Convert to volts and return mean
-            volts = (data - y_ref) * y_incr + y_orig
-            mean_voltage = float(np.mean(volts))
-            print(f"[DEBUG] Ch{ch} waveform mean: {mean_voltage:.4f}V")
-            
-            return mean_voltage
-            
-        except Exception as e:
-            print(f"[SCPI] Error in backup waveform method for channel {ch}: {e}")
-            return np.nan
-
-    def read_many(self, avg=1):
-        """Read all channels with averaging."""
-        vals = []
-        for ch in self.channels:
-            samples = []
-            for i in range(max(1, avg)):
-                v = self.read_channel(ch)
-                if np.isfinite(v): 
-                    samples.append(v)
-                else:
-                    print(f"[DEBUG] Got invalid reading from CH{ch} (attempt {i+1}/{avg})")
-                time.sleep(0.002)  # Small delay between readings
-            
-            if samples:
-                avg_val = float(np.mean(samples))
-                vals.append(avg_val)
-                if len(self.channels) <= 4:  # Don't spam if many channels
-                    print(f"[DEBUG] CH{ch}: {len(samples)} samples, avg={avg_val:.4f}V")
-            else:
-                print(f"[DEBUG] No valid samples from CH{ch}")
-                vals.append(np.nan)
-        
-        return np.array(vals, float)
-
-    def test_all_channels(self):
-        """Test function to verify all channels are working."""
-        print("\n[DEBUG] Testing all channels...")
-        for ch in self.channels:
-            reading = self.read_channel(ch)
-            print(f"[DEBUG] Channel {ch} test: {reading}V")
-        print("[DEBUG] Channel test complete\n")
-
-    def close(self):
-        try: 
-            self.scope.close()
-            print("[DEBUG] Scope connection closed")
-        except: 
-            pass
-        try: 
-            self.rm.close()
-            print("[DEBUG] VISA resource manager closed")
-        except: 
-            pass
 
 class HeaterBus:
     """Serial sender for 'heater,value;...\\n' strings."""
     def __init__(self):
-
-        print(f"[DEBUG] Connecting to serial port {SERIAL_PORT} at {BAUD_RATE} baud...")
-        self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
-        time.sleep(0.4)
-        self.ser.reset_input_buffer(); self.ser.reset_output_buffer()
-        print("[DEBUG] Serial connection established")
-
-    def send(self, config: dict):
-        msg = "".join(f"{h},{float(v):.3f};" for h,v in config.items()) + "\n"
         
-        self.ser.write(msg.encode()); self.ser.flush()
+        print(f"Connecting to serial port {SERIAL_PORT}...")
+        self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
+        time.sleep(0.2)
+        self.ser.reset_input_buffer()
+        self.ser.reset_output_buffer()
+        
+    def send(self, config: dict):
+        voltage_message = "".join(f"{heater},{value};" for heater, value in config.items()) + '\n'
+        self.ser.write(voltage_message.encode())
+        self.ser.flush()
+        time.sleep(0.01)
+        self.ser.reset_input_buffer()
+        self.ser.reset_output_buffer()
 
     def close(self):
         try: self.ser.close()
