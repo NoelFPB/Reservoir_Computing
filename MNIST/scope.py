@@ -39,7 +39,7 @@ class RigolScope:
         try:
             query = f':MEASure:STATistic:ITEM? CURRent,VMAX,CHANnel{ch}'
             value = float(self.scope.query(query))
-            if not np.isnan(value) and -10 <= value <= 10:
+            if not np.isnan(value) and -10 <= value <= 15:
                 return round(value, 5)
             return np.nan
         except:

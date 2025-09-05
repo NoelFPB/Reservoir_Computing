@@ -55,9 +55,6 @@ WASHOUT = 10
 # Task: 'mackey_glass' or 'narma10'
 TASK = 'mackey_glass'
 
-# Dry-run without hardware (simulated PD readings)
-SIMULATION_MODE = False
-
 # ==========================
 # SMALL HELPERS
 # ==========================
@@ -117,11 +114,7 @@ class RigolScope:
     """Very small Rigol HDO reader using MEASure commands."""
     def __init__(self, channels):
         self.channels = channels
-        if SIMULATION_MODE:
-            self.rm = self.scope = None
-            print("[DEBUG] Scope in SIMULATION_MODE - will return random values")
-            return
-        
+
         print("[DEBUG] Connecting to Rigol scope...")
         self.rm = pyvisa.ResourceManager()
         addr = self.rm.list_resources()[0]
@@ -158,12 +151,6 @@ class RigolScope:
     
     def read_channel(self, ch):
         """Read a single channel using MEASure command."""
-        if SIMULATION_MODE:
-            # Return varying simulated values with some input dependence
-            base = 2.0 + 0.3 * np.sin(time.time() * 2 + ch)  # Time-varying
-            noise = 0.05 * np.random.randn()
-            return float(base + noise)
-        
         try:
             # Try different measurement types in order of preference
             measurement_types = ['VAVG', 'VMEAN', 'VMAX']  # Average, Mean, or Max
@@ -267,8 +254,6 @@ class RigolScope:
         print("[DEBUG] Channel test complete\n")
 
     def close(self):
-        if SIMULATION_MODE: 
-            return
         try: 
             self.scope.close()
             print("[DEBUG] Scope connection closed")
@@ -283,11 +268,7 @@ class RigolScope:
 class HeaterBus:
     """Serial sender for 'heater,value;...\\n' strings."""
     def __init__(self):
-        if SIMULATION_MODE:
-            self.ser = None
-            print("[DEBUG] HeaterBus in SIMULATION_MODE - will print commands only")
-            return
-        
+
         print(f"[DEBUG] Connecting to serial port {SERIAL_PORT} at {BAUD_RATE} baud...")
         self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
         time.sleep(0.4)
@@ -297,14 +278,9 @@ class HeaterBus:
     def send(self, config: dict):
         msg = "".join(f"{h},{float(v):.3f};" for h,v in config.items()) + "\n"
         
-        if SIMULATION_MODE: 
-            print(f"[DEBUG] Would send: {msg[:100]}..." if len(msg) > 100 else f"[DEBUG] Would send: {msg}")
-            return
-            
         self.ser.write(msg.encode()); self.ser.flush()
 
     def close(self):
-        if SIMULATION_MODE: return
         try: self.ser.close()
         except: pass
 

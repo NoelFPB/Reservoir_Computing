@@ -29,9 +29,9 @@ V_BIAS_INTERNAL = 2.50
 V_BIAS_INPUT = 2.50
 
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
-T_SETTLE = 0.2          # Time to let spatial pattern develop
-K_VIRTUAL = 1            # Still use virtual nodes for feature diversity
-SETTLE = 0.05            # Faster sampling for spatial patterns, how ofter we measure the nodes
+T_SETTLE = 0.1          # Time to let spatial pattern develop
+K_VIRTUAL = 2            # Still use virtual nodes for feature diversity
+SETTLE = 0.02            # Faster sampling for spatial patterns, how ofter we measure the nodes
 READ_AVG = 1             # Fewer averages needed
 
 # Spatial encoding parameters
@@ -39,7 +39,7 @@ SPATIAL_GAIN = 5.0       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 20 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
 # ==========================
@@ -105,6 +105,7 @@ def create_balanced_subset(X, y, n_per_class):
     y_subset = np.array(y_subset)[indices]
     
     return X_subset, y_subset
+
 # ==========================
 # FUNCTIONS
 # ==========================
@@ -114,13 +115,6 @@ def rand_mask(n):
     m = np.ones(n)
     m[np.random.choice(n, size=n//2, replace=False)] = -1
     return m
-
-def build_features(Z, quadratic=True):
-    """Features = [1, Z, Z^2] (or [1, Z])."""
-    if quadratic:
-        return np.hstack([np.ones((len(Z),1)), Z, Z**2])
-    return np.hstack([np.ones((len(Z),1)), Z])
-
 
 # ==========================
 # CLASSES
@@ -171,6 +165,8 @@ class PhotonicReservoir:
             for h in self.internal_heaters
         }
 
+
+        #self.mesh_bias = {h: 0.0 for h in self.internal_heaters}
         print(self.mesh_bias)
         
         # Input heater baseline
@@ -188,48 +184,6 @@ class PhotonicReservoir:
         self.scope.close()
         self.bus.close()
 
-# ==========================
-# SPATIAL ENCODING
-# ==========================
-
-def encode_image_advanced(image_pixels):
-    """
-    Advanced encoding using random projections for better feature extraction.
-    """
-    # Reshape to 28x28 for spatial operations
-    image_2d = image_pixels.reshape(28, 28)
-    
-    heater_values = []
-    
-    for i, heater in enumerate(INPUT_HEATERS):
-        # Create different spatial filters for each heater
-        if i == 0:  # Top edge detector
-            region = image_2d[:10, :].flatten()
-        elif i == 1:  # Bottom edge detector  
-            region = image_2d[-10:, :].flatten()
-        elif i == 2:  # Left edge detector
-            region = image_2d[:, :10].flatten()
-        elif i == 3:  # Right edge detector
-            region = image_2d[:, -10:].flatten()
-        elif i == 4:  # Center region
-            region = image_2d[9:19, 9:19].flatten()
-        elif i == 5:  # Diagonal 1
-            region = np.diag(image_2d).flatten()
-        else:  # Diagonal 2 or random projection
-            region = np.diag(np.fliplr(image_2d)).flatten()
-        
-        # Compute intensity for this spatial filter
-        region_intensity = np.mean(region)
-        
-        # Convert to voltage
-        #heater_voltage = V_BIAS_INPUT + SPATIAL_GAIN * (region_intensity - 0.5)
-        
-        heater_voltage = V_MIN + (V_MAX - V_MIN) * region_intensity
-        heater_voltage += np.random.normal(0, NOISE_LEVEL)  # Regularization
-        
-        heater_values.append(np.clip(heater_voltage, V_MIN, V_MAX))
-    
-    return heater_values
 
 # ==========================
 # PHOTONIC RESERVOIR
@@ -285,6 +239,15 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
             
             # Read the state of the reservoir from the photodetectors.
             pd_reading = self.scope.read_many(avg=READ_AVG)
+
+            # Check for NaN immediately after scope read
+            if np.any(np.isnan(pd_reading)):
+                print(f"  NaN detected in chunk {i}: {pd_reading}")
+                print(f"  Input voltages were: {input_voltages}")
+                print(f"  Pixel chunk was: {pixel_chunk}")
+                # Skip this entire image
+                return np.full(num_chunks * len(self.scope.channels), np.nan)
+
             reservoir_features.append(pd_reading)
 
         # Flatten the list of readings into a single feature vector.
@@ -301,7 +264,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         processed_labels = []
 
         for i, (image, label) in enumerate(zip(X_images, y_labels)):
-            if (i + 1) % 50 == 0:
+            if (i + 1) % 25 == 0:
                 print(f"[{phase_name}] Processed {i+1}/{len(X_images)} images")
 
             try:
