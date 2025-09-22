@@ -9,6 +9,11 @@ from scope import  RigolScope
 from heater_bus import HeaterBus
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
+import os, time, json
+from datetime import datetime
+
+
+# MAYBE TRY OPTION A FOR THE MASK THING
 
 """
 MNIST Digit Classification using Photonic EML
@@ -18,6 +23,11 @@ MNIST Digit Classification using Photonic EML
 # ==========================
 # CONFIG
 # ==========================
+# How many 7-wide row bands to use (2, 3, or 4 recommended)
+ROW_BANDS = 4   # 3 → 21 pixels → 3 chunks per image
+# When using chunk mode, keep projection off:
+PROJECTION_MODE = False
+
 SERIAL_PORT = 'COM3'
 BAUD_RATE = 115200
 
@@ -30,7 +40,7 @@ V_BIAS_INPUT = 2.50
 
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
 T_SETTLE = 0.03          # Time to let spatial pattern develop
-K_VIRTUAL = 2            # Still use virtual nodes for feature diversity
+K_VIRTUAL = 3            # Still use virtual nodes for feature diversity
 SETTLE = 0.006            # Faster sampling for spatial patterns, how ofter we measure the nodes
 READ_AVG = 1             # Fewer averages needed
 BURST = 1
@@ -39,13 +49,77 @@ SPATIAL_GAIN = 0.4       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 500 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
-# ==========================
-# DATA LOADING AND PREPROCESSING
-# ==========================
 
+def zero_mean_orthogonal_masks(k, width=7, seed=42, max_tries=5000):
+    rng = np.random.default_rng(seed)
+    M = []
+    ones = np.ones(width)
+
+    def is_ok(v):
+        # ±1, near-zero-sum and orthogonal-enough to existing rows & ones
+        if abs(v.sum()) > 1:               # keep |sum| ≤ 1
+            return False
+        if abs((v @ ones) / width) > 0.2:  # ~orthogonal to ones
+            return False
+        for m in M:
+            if abs((v @ m) / width) > 0.2: # ~orthogonal to previous masks
+                return False
+        return True
+
+    for _ in range(max_tries):
+        v = rng.choice([-1.0, 1.0], size=width)
+        # Heuristic balance: force counts of +1/-1 to differ by ≤1
+        if abs((v == 1).sum() - (v == -1).sum()) > 1:
+            continue
+        if is_ok(v):
+            M.append(v)
+            if len(M) == k:
+                break
+
+    if len(M) < k:
+        # fallback: Gram-Schmidt + sign for last few
+        X = np.array(M, float)
+        # Project random vectors to orthogonal subspace, then sign
+        while len(M) < k:
+            v = rng.standard_normal(width)
+            if X.size:
+                v = v - X.T @ np.linalg.pinv(X @ X.T) @ (X @ v)
+            v = np.sign(v)
+            if is_ok(v):
+                M.append(v)
+                X = np.array(M, float)
+    return np.array(M, float)
+
+
+def hadamard_like_masks(n_masks, width=7, seed=0):
+    rng = np.random.default_rng(seed)
+    M = []
+    while len(M) < n_masks:
+        v = rng.choice([-1.0, 1.0], size=width)
+        # accept only if nearly orthogonal to existing ones
+        if all(abs(np.dot(v, m)/width) < 0.2 for m in M):
+            M.append(v)
+    return np.array(M)
+
+
+
+def downsample_to_7xM(img2d: np.ndarray, M: int) -> np.ndarray:
+    """
+    Reduce 28x28 image to a 7xM grid using max-pooling:
+      - Columns: 28 -> 7 via 4-wide non-overlapping max
+      - Rows:    28 -> M via max over nearly-equal row bands (np.array_split)
+    Returns array shape (M, 7) where each row is one 7-value chunk.
+    """
+    assert img2d.shape == (28, 28)
+    # columns: 28 -> 7 (keep horizontal detail for each heater)
+    col_reduced = img2d.reshape(28, 7, 4).max(axis=2)  # (28, 7)
+    # rows: 28 -> M bands
+    bands = np.array_split(col_reduced, M, axis=0)     # list of (rows_i, 7)
+    out = np.stack([b.max(axis=0) for b in bands], axis=0)  # (M, 7)
+    return out
 
 def load_mnist_data(n_samples_per_class=50):
     print("Loading MNIST dataset...")
@@ -60,18 +134,14 @@ def load_mnist_data(n_samples_per_class=50):
         print(f"Full MNIST dataset: {X.shape[0]} samples")
         
         # Reshape images to 7x7 (49 pixels) by downsampling
+        # 7 x ROW_BANDS max-pooling
         X_resized = []
         for img in X:
-            # Reshape to a 28x28 grid
             img_2d = img.reshape(28, 28)
-            # Reshape for downsampling to 7x7 (4x4 blocks)
-#           img_downsampled = img_2d.reshape(7, 4, 7, 4).mean(axis=(1, 3))
-            img_downsampled = img_2d.reshape(7, 4, 7, 4).max(axis=(1, 3))
-
-            # Flatten back to a 1D array and append
-            X_resized.append(img_downsampled.flatten())
-
+            grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)  # (M,7)
+            X_resized.append(grid7xM.flatten())             # size = 7*M
         X_resized = np.array(X_resized)
+
         
         # Sample balanced subset from the resized dataset
         X_subset, y_subset = create_balanced_subset(X_resized, y, n_samples_per_class)
@@ -145,7 +215,18 @@ class PhotonicReservoir:
 
         # Input masks (fixed)
         self.main_mask = rand_mask(len(self.input_heaters))
-        self.micro_masks = [rand_mask(len(self.input_heaters)) for _ in range(K_VIRTUAL)]
+        #self.micro_masks = [rand_mask(len(self.input_heaters)) for _ in range(K_VIRTUAL)]
+        # in __init__:
+        #self.micro_masks = hadamard_like_masks(K_VIRTUAL-1, len(self.input_heaters), seed=42)
+
+        # EITHER: no ones-row, K masks total
+        #self.micro_masks = zero_mean_orthogonal_masks(K_VIRTUAL, len(self.input_heaters), seed=42)
+        # and remove the special-casing that inserts the all-ones row
+
+        # OR: keep the ones-row, but generate K-1 micro-masks orthogonal to ones:
+        self.micro_masks = zero_mean_orthogonal_masks(K_VIRTUAL - 1, len(self.input_heaters), seed=42)
+
+
 
         # Apply initial baseline
         self.bus.send({**self.mesh_bias, **self.input_bias})
@@ -170,76 +251,88 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         super().__init__(input_heaters, all_heaters, scope_channels)
         print("[MNIST] Photonic reservoir initialized for spatial classification")
     
-
     def process_spatial_pattern(self, image_pixels):
         """
-        Process one 7x7-downsampled MNIST image with:
-        - bias-centered pixel->voltage mapping (avoid saturation)
-        - K_VIRTUAL masked sub-steps per chunk (virtual nodes)
-        - BURST transient reads per sub-step
+        Unified logic for all K:
+        - builds a mask matrix of shape (K_eff, 7)
+            * K_eff = 1  -> [ones]           (fast path, same behavior as old code)
+            * K_eff > 1 -> [ones] + (K_eff-1) random ±1 masks from self.micro_masks
+        - one write + one read per mask per chunk
+        - no autoscale, no retry, BURST=1 (keep READ_AVG small for speed)
 
-        Returns
-        -------
-        np.ndarray, shape = (num_chunks * K_VIRTUAL * BURST * n_channels, )
+        Returns a 1D feature vector of length: num_chunks * K_eff * n_channels
         """
-        # --- config (expects these globals to exist) ---
-        # V_MIN, V_MAX, V_BIAS_INPUT, SPATIAL_GAIN
-        # K_VIRTUAL, SETTLE, READ_AVG, and define BURST (e.g., BURST = 2)
-        try:
-            BURST
-        except NameError:
-            # default if not set above
-            BURST = 2
+        # ---- globals / params ----
+        K_req   = int(globals().get("K_VIRTUAL", 1))        # requested K
+        settle  = float(globals().get("SETTLE", 0.0))
+        readavg = int(globals().get("READ_AVG", 1))
+        vmin, vmax = float(globals().get("V_MIN", 0.1)), float(globals().get("V_MAX", 4.9))
+        v_bias  = float(globals().get("V_BIAS_INPUT", 2.5))
+        gain    = float(globals().get("SPATIAL_GAIN", 0.4))
+
+        heaters     = self.input_heaters
+        chunk_size  = len(heaters)                # 7
+        n_channels  = len(self.scope.channels)
+
+        x = np.asarray(image_pixels, float).ravel()
+        total_pixels = (x.size // chunk_size) * chunk_size
+        x = x[:total_pixels]
+        num_chunks = total_pixels // chunk_size
+
+        half_swing = 0.5 * (vmax - vmin)
+        x_centered = (x - 0.5) * 2.0              # [-1, 1]
+
+        # ---- build mask matrix once (unified path) ----
+        # K_eff = 1 uses [ones] -> identical to "no mask" behavior (fast)
+        if K_req <= 1:
+            mask_matrix = np.ones((1, chunk_size), dtype=float)
+        else:
+            need = K_req - 1
+            assert len(self.micro_masks) >= need, \
+                f"Need {need} micro masks, have {len(self.micro_masks)}"
+            mask_matrix = np.vstack([
+                np.ones((1, chunk_size), dtype=float),             # baseline mask
+                np.asarray(self.micro_masks[:need], dtype=float)   # ±1 masks
+            ])
+        K_eff = mask_matrix.shape[0]
+
+        # ---- local refs reduce Python overhead ----
+        send      = self.bus.send
+        read_many = self.scope.read_many
+
+        # tiny spin-wait for sub-ms delays; otherwise sleep
+        def tiny_wait(dt):
+            if dt <= 0.0: return
+            if dt < 0.001:
+                t0 = time.perf_counter()
+                while time.perf_counter() - t0 < dt:
+                    pass
+            else:
+                time.sleep(dt)
 
         features = []
 
-        chunk_size = len(self.input_heaters)               # 7 in your setup
-        n_channels = len(self.scope.channels)              # 4 in your setup
-        total_pixels = len(image_pixels)
-
-        # Safety: ensure we can form full chunks
-        if total_pixels % chunk_size != 0:
-            # Truncate extra pixels (or raise if you prefer strictness)
-            total_pixels = (total_pixels // chunk_size) * chunk_size
-            image_pixels = image_pixels[:total_pixels]
-
-        num_chunks = total_pixels // chunk_size
-        half_swing = 0.5 * (V_MAX - V_MIN)
-
         for i in range(num_chunks):
-            # pixels for this chunk (length == chunk_size)
-            chunk = np.asarray(image_pixels[i*chunk_size:(i+1)*chunk_size], dtype=float)
+            # per-chunk base voltage offset (no autoscale for speed)
+            sl = slice(i*chunk_size, (i+1)*chunk_size)
+            base = gain * half_swing * x_centered[sl]            # shape (7,)
 
-            # Precompute centered base drive (common to all masks)
-            # chunk in [0,1] -> centered in [-0.5,0.5] -> scaled by SPATIAL_GAIN and DAC swing
-            base = (chunk - 0.5) * 2.0 * SPATIAL_GAIN * half_swing  # shape (chunk_size,)
+            # iterate masks (K_eff times; when K_eff==1 this is minimal)
+            for m in mask_matrix:
+                v = v_bias + base * m
+                v = np.clip(v, vmin, vmax)
 
-            for k in range(K_VIRTUAL):
-                mask = self.micro_masks[k]  # ±1 array of length chunk_size
-                v = V_BIAS_INPUT + base * mask
-                v = np.clip(v, V_MIN, V_MAX)
+                # try a faster bus path (tuple/array); else fallback to dict
+                try:
+                    send((heaters, v))                           # if your driver supports it
+                except TypeError:
+                    send({h: float(f"{vj:.3f}") for h, vj in zip(heaters, v)})
 
-                # Push voltages
-                config = {h: round(float(vj), 3) for h, vj in zip(self.input_heaters, v)}
-                self.bus.send(config)
+                tiny_wait(settle)
+                pd = read_many(avg=readavg)
+                features.append(pd)
 
-                # Take a small transient burst of PD reads
-                for b in range(BURST):
-                    time.sleep(SETTLE)  # short delay to march along the transient
-                    pd = self.scope.read_many(avg=READ_AVG)  # e.g., 1–2 for speed
-
-                    # Robustness: if NaN appears, skip the whole image
-                    if np.any(np.isnan(pd)):
-                        print(f"  NaN detected @ chunk {i}, mask {k}, burst {b}: {pd}")
-                        print(f"  Voltages: {v.tolist()}")
-                        return np.full(num_chunks * K_VIRTUAL * BURST * n_channels, np.nan, dtype=float)
-
-                    features.append(pd)
-
-        # Flatten to 1D feature vector
-        return np.asarray(features, dtype=float).ravel()
-
-
+        return np.asarray(features, float).ravel()
 
     def process_dataset(self, X_images, y_labels, phase_name="PROCESSING"):
         """
@@ -346,7 +439,6 @@ def train_mnist_classifier(X_features, y_labels):
         'Logistic Regression': LogisticRegression(
             max_iter=10000,
             random_state=42,
-            multi_class='multinomial',  # multinomial handles >2 classes properly
             solver='lbfgs'              # good for multinomial
         ),
         'Ridge Classifier': RidgeClassifier(alpha=1.0, random_state=42)
@@ -411,58 +503,102 @@ def train_mnist_classifier(X_features, y_labels):
 # VISUALIZATION AND ANALYSIS
 # ==========================
 
-def visualize_results(X_images, y_labels, classifier, X_test, y_test, results):
+
+
+def visualize_results(
+    X_images, y_labels, classifier, X_test, y_test, results,
+    *,
+    save_dir="figures",
+    meta=None,            # dict like {"K_VIRTUAL": 6, "ROW_BANDS": 4, "N_SAMPLES_PER_DIGIT": 200, ...}
+    total_seconds=None,   # float seconds
+    run_tag=None          # optional short string to add to filename
+):
     """
-    Visualize classification results.
+    Visualize classification results, annotate with run metadata, and save to disk.
     """
     try:
         import matplotlib.pyplot as plt
-        
-        # Plot confusion matrix
+
+        # Ensure output folder exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Build figure
         plt.figure(figsize=(12, 4))
-        
-        # Confusion matrix
-        plt.subplot(1, 3, 1)
+
+        # Confusion matrix (use the best model in results if you want; keeping logistic here to match your code)
+        plt.subplot(1, 2, 1)
         cm = confusion_matrix(y_test, results['Logistic Regression']['y_pred'])
-        plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        plt.imshow(cm, interpolation='nearest')  # default colormap (no explicit colors)
         plt.title('Confusion Matrix')
         plt.colorbar()
         plt.xlabel('Predicted Label')
         plt.ylabel('True Label')
-        
-        # Sample classifications
-        plt.subplot(1, 3, 2)
-        # Find some example images and their classifications
-        sample_indices = np.random.choice(len(X_test), 6, replace=False)
-        # This would require mapping back to original images
-        plt.title('Sample Classifications')
-        plt.text(0.5, 0.5, 'See console output\nfor detailed results', 
-                ha='center', va='center', transform=plt.gca().transAxes)
-        
-        # Accuracy by digit
-        plt.subplot(1, 3, 3)
+
+        # Per-digit accuracy
+        plt.subplot(1, 2, 2)
         digit_accuracies = []
         for digit in range(10):
             digit_mask = (y_test == digit)
             if np.sum(digit_mask) > 0:
                 digit_pred = results['Logistic Regression']['y_pred'][digit_mask]
                 digit_true = y_test[digit_mask]
-                accuracy = accuracy_score(digit_true, digit_pred)
-                digit_accuracies.append(accuracy)
+                acc = accuracy_score(digit_true, digit_pred)
+                digit_accuracies.append(acc)
             else:
-                digit_accuracies.append(0)
-        
-        plt.bar(range(10), digit_accuracies)
+                digit_accuracies.append(0.0)
+        plt.bar(range(10), digit_accuracies)  # default colors
         plt.xlabel('Digit')
         plt.ylabel('Accuracy')
         plt.title('Per-Digit Accuracy')
         plt.xticks(range(10))
-        
+
+        # --- Compose a suptitle with metadata ---
+        meta = meta or {}
+        best_name = max(results.keys(), key=lambda k: results[k]['test_accuracy'])
+        best_acc  = results[best_name]['test_accuracy']
+
+        # pull key bits if present
+        K = meta.get("K_VIRTUAL", "N/A")
+        bands = meta.get("ROW_BANDS", "N/A")
+        nspd = meta.get("N_SAMPLES_PER_DIGIT", "N/A")
+        gain = meta.get("SPATIAL_GAIN", "N/A")
+        read_avg = meta.get("READ_AVG", "N/A")
+
+        time_str = f"{total_seconds:.2f}s" if isinstance(total_seconds, (int, float)) else "N/A"
+        meta_line_1 = f"Best: {best_name}  |  Test Acc: {best_acc:.3f}  |  Time: {time_str}"
+        meta_line_2 = f"K={K}, ROW_BANDS={bands}, N_SAMPLES_PER_DIGIT={nspd}, SPATIAL_GAIN={gain}, READ_AVG={read_avg}"
+        plt.suptitle(meta_line_1 + "\n" + meta_line_2, y=1.05, fontsize=11)
+
         plt.tight_layout()
+
+        # --- Save figure (timestamped filename) ---
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tag = f"_{run_tag}" if run_tag else ""
+        fname_base = f"mnist_photonic_results{tag}_{ts}"
+        png_path = os.path.join(save_dir, fname_base + ".png")
+
+        plt.savefig(png_path, dpi=200, bbox_inches='tight')
+
+        # (Optional) save a small metadata JSON next to the image
+        meta_out = dict(meta)
+        meta_out.update({
+            "best_classifier": best_name,
+            "test_accuracy": float(best_acc),
+            "total_seconds": float(total_seconds) if isinstance(total_seconds, (int, float)) else None,
+            "timestamp": ts,
+            "filename": os.path.basename(png_path),
+        })
+        with open(os.path.join(save_dir, fname_base + ".json"), "w", encoding="utf-8") as f:
+            json.dump(meta_out, f, indent=2)
+
+        # Show (after saving to ensure it’s written even if the window is closed)
         plt.show()
-        
+
+        print(f"[Saved] {png_path}")
+
     except ImportError:
         print("Matplotlib not available - skipping visualization")
+
 
 def analyze_feature_importance(classifier, feature_names=None):
     """
@@ -492,7 +628,7 @@ def main_mnist():
     print("="*60)
     print("PHOTONIC RESERVOIR MNIST CLASSIFICATION")
     print("="*60)
-    
+    t0 = time.perf_counter()
     try:
         # Load data
         X_images, y_labels = load_mnist_data(N_SAMPLES_PER_DIGIT)
@@ -513,10 +649,26 @@ def main_mnist():
         
         # Analysis
         analyze_feature_importance(classifier)
-        
-        # Visualization
-        visualize_results(X_images, y_processed, classifier, *test_data, results)
-        
+        total_time = time.perf_counter() - t0
+
+        meta = {
+            "K_VIRTUAL": K_VIRTUAL,
+            "ROW_BANDS": ROW_BANDS,
+            "N_SAMPLES_PER_DIGIT": N_SAMPLES_PER_DIGIT,
+            "SPATIAL_GAIN": SPATIAL_GAIN,
+            "READ_AVG": READ_AVG,
+            "SETTLE": SETTLE,
+            "T_SETTLE": T_SETTLE,
+        }
+
+        visualize_results(
+            X_images, y_processed, classifier, *test_data, results,
+            save_dir="figures",
+            meta=meta,
+            total_seconds=total_time,
+            run_tag="mnist_photonic"
+        )
+
         # Summary
         best_accuracy = max([r['test_accuracy'] for r in results.values()])
         print(f"\n{'='*60}")
