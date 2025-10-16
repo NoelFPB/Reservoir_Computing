@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from  Lib.scope import  RigolDualScopes
 from Lib.heater_bus import HeaterBus
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
 import os, time, json
 from datetime import datetime
@@ -24,7 +25,7 @@ MNIST Digit Classification using Photonic EML
 # CONFIG
 # ==========================
 # How many 7-wide row bands to use (2, 3, or 4 recommended)
-ROW_BANDS = 3   # 3 → 21 pixels → 3 chunks per image
+ROW_BANDS = 4   # 3 → 21 pixels → 3 chunks per image
 # When using chunk mode, keep projection off:
 PROJECTION_MODE = False
 
@@ -48,11 +49,11 @@ SETTLE = 0.006            # Faster sampling for spatial patterns, how ofter we m
 READ_AVG = 1             # Fewer averages needed
 BURST = 1
 # Spatial encoding parameters
-SPATIAL_GAIN = 0.4       # How strongly pixels drive heaters
+SPATIAL_GAIN = 0.5       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 300 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
 
@@ -407,7 +408,7 @@ def train_mnist_classifier(X_features, y_labels):
     print("\nTraining MNIST classifier...")
     
     # Build expanded feature set
-    X_expanded = build_features_classification(X_features, quadratic=False, interaction=False)
+    X_expanded = build_features_classification(X_features, quadratic=True, interaction=False)
     print(f"Feature expansion: {X_features.shape[1]} → {X_expanded.shape[1]} features")
     
     # Split into train/test
@@ -445,7 +446,8 @@ def train_mnist_classifier(X_features, y_labels):
             solver='lbfgs',
             C=0.1              # good for multinomial
         ),
-        'Ridge Classifier': RidgeClassifier(alpha=np.logspace(-3,3,13))
+            'Ridge (CV)': 
+        RidgeClassifierCV(alphas=np.logspace(-3, 3, 13))
 }
 
     
