@@ -52,7 +52,7 @@ SPATIAL_GAIN = 0.4       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
 

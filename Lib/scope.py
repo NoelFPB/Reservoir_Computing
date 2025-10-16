@@ -4,7 +4,7 @@ Simple Rigol Scope Interface
 
 Minimal, no-frills interface for Rigol oscilloscopes.
 """
-
+from concurrent.futures import ThreadPoolExecutor
 import time, re
 import numpy as np
 import pyvisa
@@ -54,7 +54,7 @@ class RigolScope:
                 v = self.read_channel(ch)
                 if np.isfinite(v):
                     samples.append(v)
-                time.sleep(0.002)
+                #time.sleep(0.002)
             
             if samples:
                 vals.append(float(np.mean(samples)))
@@ -175,22 +175,29 @@ class RigolDualScopes:
         except Exception:
             return np.nan
 
-    def read_many(self, avg=1):
-        """Return [scope1 channels → scope2 channels]"""
-        avg = max(1, int(avg))
-        vals = []
-        for ch in self.channels1:
-            samples = [self._read_channel(self.scope1, ch) for _ in range(avg)]
-            samples = [v for v in samples if np.isfinite(v)]
-            vals.append(np.mean(samples) if samples else np.nan)
-            time.sleep(0.002)
-        for ch in self.channels2:
-            samples = [self._read_channel(self.scope2, ch) for _ in range(avg)]
-            samples = [v for v in samples if np.isfinite(v)]
-            vals.append(np.mean(samples) if samples else np.nan)
-            time.sleep(0.002)
-        return np.array(vals, float)
+    def _read_scope_channels(self, scope, channels, avg):
+            avg = max(1, int(avg))
+            out = []
+            # Remove per-sample sleep; VISA I/O already blocks until reply
+            for ch in channels:
+                samples = [self._read_channel(scope, ch) for _ in range(avg)]
+                samples = [v for v in samples if np.isfinite(v)]
+                out.append(float(np.mean(samples)) if samples else np.nan)
+            return out
 
+    def read_many(self, avg=1):
+        """
+        Returns values in GUARANTEED order:
+          [scope1 channels ... , scope2 channels ...]
+        Reads both scopes in parallel to cut wall time roughly in half.
+        """
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f1 = ex.submit(self._read_scope_channels, self.scope1, self.channels1, avg)
+            f2 = ex.submit(self._read_scope_channels, self.scope2, self.channels2, avg)
+            v1 = f1.result()
+            v2 = f2.result()
+        return np.array(v1 + v2, dtype=float)
+        
     def close(self):
         for s in (self.scope1, self.scope2):
             try:
