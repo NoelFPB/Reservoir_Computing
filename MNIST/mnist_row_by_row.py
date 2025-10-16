@@ -5,8 +5,8 @@ from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, mean_squared_error
 from sklearn.datasets import fetch_openml
 import matplotlib.pyplot as plt
-from scope import  RigolScope
-from heater_bus import HeaterBus
+from MNIST.Lib.scope import  RigolScope
+from MNIST.Lib.heater_bus import HeaterBus
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
 

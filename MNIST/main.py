@@ -5,8 +5,8 @@ from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, mean_squared_error
 from sklearn.datasets import fetch_openml
 import matplotlib.pyplot as plt
-from MNIST.Lib.scope import  RigolScope
-from MNIST.Lib.heater_bus import HeaterBus
+from  Lib.scope import  RigolDualScopes
+from Lib.heater_bus import HeaterBus
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
 import os, time, json
@@ -31,7 +31,10 @@ PROJECTION_MODE = False
 SERIAL_PORT = 'COM3'
 BAUD_RATE = 115200
 
-SCOPE_CHANNELS = [1, 2, 3, 4]
+SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
+SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
+
+
 INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]
 ALL_HEATERS = list(range(35)) # Ommitting the second part of C
 V_MIN, V_MAX = 0.10, 4.90
@@ -193,10 +196,10 @@ def rand_mask(n):
 # ==========================
 class PhotonicReservoir:
     """Base photonic reservoir class."""
-    def __init__(self, input_heaters, all_heaters, scope_channels):
+    def __init__(self, input_heaters, all_heaters):
         self.input_heaters = list(input_heaters)
         self.internal_heaters = [h for h in all_heaters if h not in self.input_heaters]
-        self.scope = RigolScope(scope_channels)
+        self.scope = RigolDualScopes(SCOPE1_CHANNELS, SCOPE2_CHANNELS, serial_scope1='HDO1B244000779')
         self.bus = HeaterBus()
 
         # Fixed random mesh bias
@@ -247,8 +250,8 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
     Inherits from the time series version but modifies for spatial processing.
     """
     
-    def __init__(self, input_heaters, all_heaters, scope_channels):
-        super().__init__(input_heaters, all_heaters, scope_channels)
+    def __init__(self, input_heaters, all_heaters):
+        super().__init__(input_heaters, all_heaters)
         print("[MNIST] Photonic reservoir initialized for spatial classification")
     
     def process_spatial_pattern(self, image_pixels):
@@ -635,7 +638,7 @@ def main_mnist():
         print(f"Dataset loaded: {len(X_images)} samples, {len(np.unique(y_labels))} classes")
         
         # Initialize reservoir
-        reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS, SCOPE_CHANNELS)
+        reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
         
         # Process dataset through reservoir
         X_features, y_processed = reservoir.process_dataset(X_images, y_labels, "TRAINING")

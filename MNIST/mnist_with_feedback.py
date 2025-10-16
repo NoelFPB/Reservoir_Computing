@@ -8,8 +8,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 
 # --- your hardware I/O drivers ---
-from scope import RigolScope
-from heater_bus import HeaterBus
+from MNIST.Lib.scope import RigolScope
+from MNIST.Lib.heater_bus import HeaterBus
 
 # =========================================================
 # CONFIG

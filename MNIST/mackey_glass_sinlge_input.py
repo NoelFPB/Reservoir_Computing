@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
-from scope import RigolScope
+from MNIST.Lib.scope import RigolScope
 """
 Minimal photonic reservoir controller (Rigol HDO1074 + serial heaters)
 WITH DEBUG PRINTS to understand what's happening
