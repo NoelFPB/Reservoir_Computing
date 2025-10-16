@@ -24,7 +24,7 @@ MNIST Digit Classification using Photonic EML
 # CONFIG
 # ==========================
 # How many 7-wide row bands to use (2, 3, or 4 recommended)
-ROW_BANDS = 4   # 3 → 21 pixels → 3 chunks per image
+ROW_BANDS = 3   # 3 → 21 pixels → 3 chunks per image
 # When using chunk mode, keep projection off:
 PROJECTION_MODE = False
 
@@ -43,7 +43,7 @@ V_BIAS_INPUT = 2.50
 
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
 T_SETTLE = 0.03          # Time to let spatial pattern develop
-K_VIRTUAL = 3            # Still use virtual nodes for feature diversity
+K_VIRTUAL = 1            # Still use virtual nodes for feature diversity
 SETTLE = 0.006            # Faster sampling for spatial patterns, how ofter we measure the nodes
 READ_AVG = 1             # Fewer averages needed
 BURST = 1
@@ -407,7 +407,7 @@ def train_mnist_classifier(X_features, y_labels):
     print("\nTraining MNIST classifier...")
     
     # Build expanded feature set
-    X_expanded = build_features_classification(X_features, quadratic=True, interaction=False)
+    X_expanded = build_features_classification(X_features, quadratic=False, interaction=False)
     print(f"Feature expansion: {X_features.shape[1]} → {X_expanded.shape[1]} features")
     
     # Split into train/test
@@ -442,9 +442,10 @@ def train_mnist_classifier(X_features, y_labels):
         'Logistic Regression': LogisticRegression(
             max_iter=10000,
             random_state=42,
-            solver='lbfgs'              # good for multinomial
+            solver='lbfgs',
+            C=0.1              # good for multinomial
         ),
-        'Ridge Classifier': RidgeClassifier(alpha=1.0, random_state=42)
+        'Ridge Classifier': RidgeClassifier(alpha=np.logspace(-3,3,13))
 }
 
     
