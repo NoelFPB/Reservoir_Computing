@@ -54,7 +54,7 @@ SPATIAL_GAIN = 0.5       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 10 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
 
@@ -206,11 +206,40 @@ class PhotonicReservoir:
 
         # Fixed random mesh bias
         rng = np.random.default_rng()
+        # self.mesh_bias = {
+        #     h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 2.4), V_MIN, V_MAX))
+        #     for h in self.internal_heaters
+        # }
         self.mesh_bias = {
-            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 2.4), V_MIN, V_MAX))
-            for h in self.internal_heaters
+            "0": 0.9507404071835892,
+            "1": 1.0932397150515143,
+            "2": 2.046298758015133,
+            "3": 0.7237265439987379,
+            "4": 1.5676740978713732,
+            "5": 3.6964477053278983,
+            "6": 0.5404968917856676,
+            "7": 3.98191879729539,
+            "8": 3.271877047473385,
+            "9": 2.3500599319816016,
+            "10": 3.7750199891063603,
+            "11": 3.599436349666226,
+            "12": 2.729628118920606,
+            "13": 3.347606759419481,
+            "14": 4.822123647201673,
+            "15": 4.326004960367147,
+            "16": 3.1033748025628745,
+            "17": 0.44475956119859467,
+            "18": 1.5298731622924193,
+            "19": 2.724919587004184,
+            "20": 0.7681224718605201,
+            "21": 0.46857580185997405,
+            "22": 0.9735421775150003,
+            "23": 3.6141091070119833,
+            "24": 0.2356095595789659,
+            "25": 4.427942424914998,
+            "26": 4.3476534178304655,
+            "27": 3.5376746701167887
         }
-
         #self.mesh_bias = {h: 0.0 for h in self.internal_heaters}
         print(self.mesh_bias)
         

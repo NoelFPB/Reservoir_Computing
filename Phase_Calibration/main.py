@@ -3,6 +3,9 @@ import json, os, time, math, argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
+# ==========================
+import os, json, time, csv
+
 try:
     from scipy.optimize import curve_fit  # optional: for cosine fit
     SCIPY_OK = True
@@ -170,104 +173,151 @@ def estimate_phase_lut_only(V, I):
     return {"phi_unwrapped": phi_unwrapped, "extrema_idx": idx_ext.tolist()}
 
 # ---------------------------
-# Hardware sweep
+# Hardware sweep (ALL CHANNELS)
 # ---------------------------
 
-def sweep_heater(heater_id, vmin, vmax, n_points, settle_s, reads_avg, scope, bus, channel=1):
+def sweep_heater(heater_id, vmin, vmax, n_points, settle_s, reads_avg, scope, bus):
     """
-    Sweep voltage on one heater, measure intensity on one PD channel.
-    Returns V_grid, I (float arrays).
+    Sweep voltage on one heater, read ALL PD channels each step.
+    Returns:
+        V_grid: (n_points,)
+        I_all : (n_points, n_channels)
     """
     V_grid = np.linspace(vmin, vmax, int(n_points))
-    I = []
+    I_rows = []
 
-    # Prepare send dict initially (don’t disturb others)
     for V in V_grid:
         bus.send({heater_id: float(V)})
         safe_sleep(settle_s)
-        pd_vals = scope.read_many(avg=int(reads_avg))  # shape ~ (n_channels,)
-        # channel is 1-indexed in your config; convert to 0-index
-        I.append(float(pd_vals[channel - 1]))
-    return V_grid, np.array(I)
+        pd_vals = scope.read_many(avg=int(reads_avg))   # shape ~ (n_channels,)
+        I_rows.append(pd_vals.astype(float))
+
+    I_all = np.vstack(I_rows)                           # (n_points, n_channels)
+    return V_grid, I_all
+
 
 # ---------------------------
-# Main calibration routine
+# Main calibration routine (ALL CHANNELS)
 # ---------------------------
 
-def calibrate_one_heater(heater_id, vmin, vmax, n_points, settle_s, reads_avg, channel,
+def _fringe_visibility(y):
+    # Michelson visibility: (Imax - Imin) / (Imax + Imin)
+    ymax, ymin = float(np.max(y)), float(np.min(y))
+    return (ymax - ymin) / max(1e-9, (ymax + ymin))
+
+def calibrate_one_heater(heater_id, vmin, vmax, n_points, settle_s, reads_avg,
+                         channel,  # kept for backward-compat; not used now
                          scope, bus, outdir="calibration"):
     os.makedirs(outdir, exist_ok=True)
 
-    print(f"[Cal] Sweeping heater {heater_id}: {vmin:.2f}→{vmax:.2f} V, points={n_points}, ch={channel}")
-    V, I = sweep_heater(heater_id, vmin, vmax, n_points, settle_s, reads_avg, scope, bus, channel)
+    print(f"[Cal] Sweeping heater {heater_id}: {vmin:.2f}→{vmax:.2f} V, points={n_points}")
+    V, I_all = sweep_heater(heater_id, vmin, vmax, n_points, settle_s, reads_avg, scope, bus)
+    n_points, n_channels = I_all.shape
+    print(f"[Cal] Read {n_channels} PD channels.")
 
-    # Detrend gentle (optional)
-    I_d = moving_avg(I, 3)
+    # Per-channel phase extraction
+    per_ch = []
+    for ch in range(n_channels):
+        I = I_all[:, ch]
+        I_d = moving_avg(I, 3)
 
-    # Estimate phase
-    if SCIPY_OK:
-        try:
-            fit = estimate_phase_from_cosine(V, I_d)
-            phi_unwrapped = fit["phi_unwrapped"]
-            fit_params = fit["params"]
-            method = "cosine_fit"
-        except Exception as e:
-            print(f"[WARN] Cosine fit failed: {e}. Falling back to LUT-only.")
-            lut = estimate_phase_lut_only(V, I_d)
-            phi_unwrapped = lut["phi_unwrapped"]
-            fit_params = None
-            method = "lut_only"
-    else:
-        lut = estimate_phase_lut_only(V, I_d)
-        phi_unwrapped = lut["phi_unwrapped"]
         fit_params = None
         method = "lut_only"
+        try:
+            if SCIPY_OK:
+                fit = estimate_phase_from_cosine(V, I_d)
+                phi_unwrapped = fit["phi_unwrapped"]
+                fit_params = fit["params"]
+                method = "cosine_fit"
+            else:
+                raise RuntimeError("SciPy not available")
+        except Exception as e:
+            # fallback
+            lut = estimate_phase_lut_only(V, I_d)
+            phi_unwrapped = lut["phi_unwrapped"]
 
-    # Build inverse LUTs
-    inv = build_inverse_lut(V, phi_unwrapped, n_phi=2048)
+        per_ch.append({
+            "channel": ch + 1,                     # 1-index for human readability
+            "phi_unwrapped": phi_unwrapped,
+            "method": method,
+            "fit_params": fit_params,
+            "visibility": _fringe_visibility(I_d),
+            "I_raw": I.tolist()
+        })
 
-    # Save JSON
+    # Pick best channel by visibility (or by |B| if you prefer when fit succeeded)
+    best_idx = int(np.argmax([d["visibility"] for d in per_ch]))
+    best = per_ch[best_idx]
+    print(f"[Cal] Best channel by visibility: ch {best['channel']} (vis={best['visibility']:.3f})")
+
+    # Build inverse LUT from best channel
+    inv = build_inverse_lut(V, best["phi_unwrapped"], n_phi=2048)
+
+    # Save JSON with ALL channels
     cal = {
         "heater_id": heater_id,
-        "method": method,
         "vmin": float(vmin),
         "vmax": float(vmax),
         "n_points": int(n_points),
         "settle_s": float(settle_s),
         "reads_avg": int(reads_avg),
-        "channel": int(channel),
         "V_grid": V.tolist(),
-        "I_raw": I.tolist(),
-        "phi_unwrapped": inv["phi_unwrapped"],
-        "v_for_phi_unwrapped": inv["v_for_phi_unwrapped"],
+        "n_channels": int(n_channels),
+        "per_channel": [
+            {
+                "channel": d["channel"],
+                "method": d["method"],
+                "fit_params": d["fit_params"],
+                "visibility": float(d["visibility"]),
+                "phi_unwrapped": d["phi_unwrapped"].tolist(),
+                "I_raw": d["I_raw"]
+            } for d in per_ch
+        ],
+        "best_channel": int(best["channel"]),
         "phi_grid_unwrapped": inv["phi_grid_unwrapped"],
         "v_of_phi_unwrapped": inv["v_of_phi_unwrapped"],
         "phi_grid_onecycle": inv["phi_grid_onecycle"],
         "v_of_phi_onecycle": inv["v_of_phi_onecycle"],
-        "fit_params": fit_params,
     }
     outpath = os.path.join(outdir, f"heater_{heater_id:02d}.json")
     with open(outpath, "w", encoding="utf-8") as f:
         json.dump(cal, f, indent=2)
     print(f"[Cal] Saved LUT → {outpath}")
 
-    # Quick plots
-    plt.figure(figsize=(12,4))
-    plt.subplot(1,3,1)
-    plt.plot(V, I, '.', alpha=0.6, label='raw')
-    plt.plot(V, moving_avg(I, 7), '-', alpha=0.9, label='smoothed')
-    plt.xlabel("Voltage (V)"); plt.ylabel("PD intensity"); plt.title(f"Heater {heater_id} sweep"); plt.legend()
+    # ---------------------------
+    # Plots: all channels
+    # ---------------------------
+    plt.figure(figsize=(15, 4.5))
 
-    plt.subplot(1,3,2)
-    plt.plot(V, phi_unwrapped, '-', lw=1.5)
-    plt.xlabel("Voltage (V)"); plt.ylabel("Unwrapped phase (rad)"); plt.title("φ(V) unwrapped")
+    # (1) Intensities for all channels
+    plt.subplot(1, 3, 1)
+    for ch in range(n_channels):
+        y = I_all[:, ch]
+        plt.plot(V, y, '.', alpha=0.35, label=f"ch{ch+1}" if ch < 9 else None)
+        plt.plot(V, moving_avg(y, 7), '-', alpha=0.9)
+    plt.xlabel("Voltage (V)")
+    plt.ylabel("PD intensity")
+    plt.title(f"Heater {heater_id} sweep (all channels)")
+    plt.legend(ncol=3, fontsize=8)
 
-    plt.subplot(1,3,3)
+    # (2) Unwrapped phase per channel (normalized to start at 0)
+    plt.subplot(1, 3, 2)
+    for d in per_ch:
+        phi = np.asarray(d["phi_unwrapped"])
+        phi = phi - phi.min()
+        plt.plot(V[:len(phi)], phi, lw=1.3, label=f"ch{d['channel']}")
+    plt.xlabel("Voltage (V)")
+    plt.ylabel("Unwrapped phase (rad)")
+    plt.title("φ(V) per channel")
+
+    # (3) Inverse LUT (one cycle) from best channel
+    plt.subplot(1, 3, 3)
     pg = np.array(inv["phi_grid_onecycle"])
     vg = np.array(inv["v_of_phi_onecycle"])
     plt.plot(pg, vg, '-')
-    plt.xlabel("Phase φ (rad, 0..2π)"); plt.ylabel("Voltage (V)")
-    plt.title("Inverse V(φ) (one cycle)")
+    plt.xlabel("Phase φ (rad, 0..2π)")
+    plt.ylabel("Voltage (V)")
+    plt.title(f"Inverse V(φ) — best ch {best['channel']}")
 
     plt.tight_layout()
     png = os.path.join(outdir, f"heater_{heater_id:02d}.png")
@@ -295,20 +345,151 @@ def voltage_for_phase(cal, phi):
     vg = np.array(cal["v_of_phi_onecycle"])
     return float(np.interp(phi, pg, vg))
 
-# ---------------------------
-# CLI
-# ---------------------------
+
+
+# Your 7 input biases (keep them stable during all calibrations)
+INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]
+INPUT_BIAS = {
+    28: 1.732,
+    29: 1.764,
+    30: 2.223,
+    31: 2.372,
+    32: 1.881,
+    33: 2.436,
+    34: 2.852,
+}
+
+MESH_HEATERS = list(range(0, 28))  # 0..27
+
+def _apply_biases(bus, bias_dict):
+    if bias_dict:
+        bus.send({int(k): float(v) for k, v in bias_dict.items()})
+
+def _phi_span_from_json(cal_json):
+    # use best channel’s unwrapped phi to compute span
+    best = int(cal_json.get("best_channel", 1))
+    per = cal_json.get("per_channel", [])
+    rec = next((d for d in per if int(d["channel"]) == best), None)
+    if rec is None:
+        # fallback: span from stored grid
+        pg = np.array(cal_json.get("phi_grid_unwrapped", []), float)
+        return float(pg[-1] - pg[0]) if len(pg) else float("nan")
+    phi = np.array(rec["phi_unwrapped"], float)
+    return float(phi.max() - phi.min()) if phi.size else float("nan")
+
+def batch_calibrate(
+    heaters=MESH_HEATERS,
+    *,
+    vmin=0.20,
+    vmax=4.80,
+    points=121,
+    settle=0.020,
+    reads=3,
+    outdir="calibration",
+    resume=True,
+    scope=None,
+    bus = None,
+    sleep_between=0.05,         # tiny pause between heaters
+    mid_bias_others=2.50        # hold non-swept mesh heaters here (optional)
+):
+    """
+    Calibrate all mesh heaters (0..27) one-by-one, saving JSONs in `outdir`
+    and a summary CSV `calibration/_summary.csv`.
+    """
+    os.makedirs(outdir, exist_ok=True)
+
+    try:
+        print("[Batch] Applying stable input biases...")
+        _apply_biases(bus, INPUT_BIAS)
+
+        if mid_bias_others is not None:
+            print("[Batch] Setting mesh heaters to mid-bias before starting...")
+            bus.send({h: float(mid_bias_others) for h in heaters})
+            time.sleep(0.2)
+
+        results = []
+        for h in heaters:
+            cal_path = os.path.join(outdir, f"heater_{h:02d}.json")
+            if resume and os.path.exists(cal_path):
+                print(f"[Batch] Skip heater {h:02d} (exists).")
+                # collect quick stats for summary
+                with open(cal_path, "r", encoding="utf-8") as f:
+                    cal = json.load(f)
+                results.append({
+                    "heater": h,
+                    "json": cal_path,
+                    "best_ch": cal.get("best_channel", None),
+                    "phi_span": _phi_span_from_json(cal),
+                    "n_points": cal.get("n_points", None),
+                    "reads": cal.get("reads_avg", None),
+                })
+                continue
+
+            print(f"[Batch] Calibrating heater {h:02d}...")
+            # hold all mesh heaters (except 'h') at mid-bias to reduce drift
+            if mid_bias_others is not None:
+                cmd = {hh: float(mid_bias_others) for hh in heaters if hh != h}
+                bus.send(cmd)
+
+            # run per-heater calibration (uses ALL PD channels; picks best)
+            outpath = calibrate_one_heater(
+                heater_id=h,
+                vmin=vmin, vmax=vmax,
+                n_points=points,
+                settle_s=settle,
+                reads_avg=reads,
+                channel=1,              # ignored by our multi-channel version
+                scope=scope, bus=bus,
+                outdir=outdir
+            )
+
+            with open(outpath, "r", encoding="utf-8") as f:
+                cal = json.load(f)
+            results.append({
+                "heater": h,
+                "json": outpath,
+                "best_ch": cal.get("best_channel", None),
+                "phi_span": _phi_span_from_json(cal),
+                "n_points": cal.get("n_points", None),
+                "reads": cal.get("reads_avg", None),
+            })
+
+            time.sleep(sleep_between)
+
+        # Write a compact CSV summary
+        csv_path = os.path.join(outdir, "_summary.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["heater", "best_ch", "phi_span", "n_points", "reads", "json"])
+            w.writeheader()
+            for r in sorted(results, key=lambda x: x["heater"]):
+                w.writerow(r)
+        print(f"[Batch] Summary written → {csv_path}")
+
+        # Quick diagnostic: warn heaters with small span (<~ 2π)
+        bad = [r for r in results if (isinstance(r["phi_span"], (int,float)) and r["phi_span"] < 2*np.pi*0.9)]
+        if bad:
+            ids = ", ".join(f"{r['heater']:02d}" for r in bad)
+            print(f"[Batch][WARN] Low phase-span (<~2π) heaters: {ids} — consider re-running with more points or a different PD channel.")
+
+        return results
+
+    finally:
+        try: scope.close()
+        except Exception: pass
+        try: bus.close()
+        except Exception: pass
+
 
 def main():
     # Defaults
     args = argparse.Namespace(
-        heater=28,
-        vmin=0.20,
-        vmax=4.80,
+        heater=31,
+        vmin=0.10,
+        vmax=4.90,
         points=121,
         settle=0.020,
         reads=3,
-        channel=3,             # <- choose the PD channel you want
+        channel=4,             # <- choose the PD channel you want
         outdir="calibration",
         scope1=None,
         scope2=None,
@@ -318,17 +499,16 @@ def main():
     bus = HeaterBus()
 
     try:
-        calibrate_one_heater(
-            heater_id=args.heater,
-            vmin=args.vmin,
-            vmax=args.vmax,
-            n_points=args.points,
-            settle_s=args.settle,
-            reads_avg=args.reads,
-            channel=args.channel,
+        batch_calibrate(
+            heaters=list(range(28)),  # 0..27
+            vmin=0.10, vmax=4.90,
+            points=121,               # 121–201 recommended
+            settle=0.020,
+            reads=3,
             scope=scope,
-            bus=bus,
-            outdir=args.outdir
+            bus = bus,
+            outdir="calibration",
+            resume=True
         )
     finally:
         try: scope.close()
