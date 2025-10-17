@@ -1,0 +1,14 @@
+{
+  "K_VIRTUAL": 3,
+  "ROW_BANDS": 4,
+  "N_SAMPLES_PER_DIGIT": 100,
+  "SPATIAL_GAIN": 0.7,
+  "READ_AVG": 1,
+  "SETTLE": 0.006,
+  "T_SETTLE": 0.03,
+  "best_classifier": "Logistic Regression",
+  "test_accuracy": 0.6,
+  "total_seconds": 2610.0759080999997,
+  "timestamp": "20251017_091717",
+  "filename": "mnist_photonic_results_mnist_photonic_20251017_091717.png"
+}

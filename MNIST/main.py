@@ -12,8 +12,9 @@ from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
 import os, time, json
 from datetime import datetime
-
-
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
 # MAYBE TRY OPTION A FOR THE MASK THING
 
 """
@@ -53,7 +54,7 @@ SPATIAL_GAIN = 0.5       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 300 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 10 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
 
@@ -206,16 +207,25 @@ class PhotonicReservoir:
         # Fixed random mesh bias
         rng = np.random.default_rng()
         self.mesh_bias = {
-            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 1), V_MIN, V_MAX))
+            h: float(np.clip(V_BIAS_INTERNAL + rng.normal(0, 2.4), V_MIN, V_MAX))
             for h in self.internal_heaters
         }
-
 
         #self.mesh_bias = {h: 0.0 for h in self.internal_heaters}
         print(self.mesh_bias)
         
         # Input heater baseline
-        self.input_bias = {h: V_BIAS_INPUT for h in self.input_heaters}
+        #self.input_bias = {h: V_BIAS_INPUT for h in self.input_heaters}
+
+        #This is the non linear inout bias determined
+        self.input_bias = {
+            28: 1.732,
+            29: 1.764,
+            30: 2.223,
+            31: 2.372,
+            32: 1.881,
+            33: 2.436,
+            34: 2.852}
 
         # Input masks (fixed)
         self.main_mask = rand_mask(len(self.input_heaters))
@@ -439,17 +449,42 @@ def train_mnist_classifier(X_features, y_labels):
     #     'Ridge Classifier': Ridge(alpha=1.0)
     # }
 
-    classifiers = {
-        'Logistic Regression': LogisticRegression(
-            max_iter=10000,
+    # classifiers = {
+    #     'Logistic Regression': LogisticRegression(
+    #         max_iter=10000,
+    #         random_state=42,
+    #         solver='lbfgs',
+    #         C=0.1              # good for multinomial
+    #     ),
+    #         'Ridge (CV)': 
+    #     RidgeClassifierCV(alphas=np.logspace(-3, 3, 13))}
+    logreg_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", LogisticRegression(
+            max_iter=20000,
             random_state=42,
-            solver='lbfgs',
-            C=0.1              # good for multinomial
-        ),
-            'Ridge (CV)': 
-        RidgeClassifierCV(alphas=np.logspace(-3, 3, 13))
-}
+            solver="lbfgs",
+        ))
+    ])
 
+    logreg_grid = GridSearchCV(
+        logreg_pipe,
+        param_grid={"clf__C": [0.03, 0.1, 0.3, 1.0]},
+        cv=5,
+        n_jobs=-1
+    )
+
+    # --- Ridge Classifier pipeline (CV inside) ---
+    ridge_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 13)))
+    ])
+
+    # --- Dictionary exactly as before ---
+    classifiers = {
+        "Logistic Regression": logreg_grid,
+        "Ridge (CV)": ridge_pipe,
+    }
     
     results = {}
     
@@ -483,7 +518,7 @@ def train_mnist_classifier(X_features, y_labels):
             
             # Cross-validation
             # Using a pipeline to correctly scale data within each fold
-            from sklearn.pipeline import make_pipeline
+  
             pipeline = make_pipeline(StandardScaler(), classifier)
             cv_scores = cross_val_score(pipeline, X_expanded, y_labels, cv=5)
             print(f"  Cross-validation: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
