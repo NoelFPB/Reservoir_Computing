@@ -3,6 +3,8 @@ import os, json, time, numpy as np
 from datetime import datetime
 from Lib.heater_bus import HeaterBus
 from Lib.scope import RigolDualScopes
+import csv
+
 
 CAL_DIR = "calibration"
 OUT_DIR = "meshes"
@@ -13,6 +15,53 @@ INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]   # 7 inputs → 7 PDs
 
 # your established input biases (keep them stable)
 INPUT_BIAS = {28:1.732, 29:1.764, 30:2.223, 31:2.372, 32:1.881, 33:2.436, 34:2.852}
+
+def metrics(M):
+    """Return effective rank and a few quick quality metrics."""
+    Mz = (M - M.mean()) / (M.std() + 1e-12)
+
+    # singular values
+    s = np.linalg.svd(Mz, compute_uv=False)
+    s = np.maximum(s, 1e-12)
+    p = s / s.sum()
+
+    # Roy & Vetterli effective rank: exp(Entropy(p))
+    eff_rank = float(np.exp(-(p * np.log(p)).sum()))
+
+    # correlations
+    Ccols = np.corrcoef(Mz, rowvar=False)  # between columns
+    Crows = np.corrcoef(Mz, rowvar=True)   # between rows
+    np.fill_diagonal(Ccols, 0.0)
+    np.fill_diagonal(Crows, 0.0)
+    mean_abs_colcorr = float(np.mean(np.abs(Ccols)))
+    mean_abs_rowcorr = float(np.mean(np.abs(Crows)))
+
+    # mutual coherence between columns
+    cols = Mz / (np.linalg.norm(Mz, axis=0, keepdims=True) + 1e-12)
+    G = cols.T @ cols
+    np.fill_diagonal(G, 0.0)
+    mu = float(np.max(np.abs(G)))
+
+    return {
+        "eff_rank": eff_rank,
+        "max_sv": float(s.max()),
+        "min_sv": float(s.min()),
+        "mean_abs_colcorr": mean_abs_colcorr,
+        "mean_abs_rowcorr": mean_abs_rowcorr,
+        "mutual_coherence": mu,
+    }
+
+def append_summary_row(csv_path, tag, seed, paths, m):
+    header = ["tag","seed","eff_rank","mean_abs_colcorr","mean_abs_rowcorr",
+              "mutual_coherence","max_sv","min_sv","M_npy","voltages_json"]
+    row = [tag, seed, m["eff_rank"], m["mean_abs_colcorr"], m["mean_abs_rowcorr"],
+           m["mutual_coherence"], m["max_sv"], m["min_sv"],
+           paths.get("M_npy",""), paths.get("voltages_json","")]
+    new_file = not os.path.exists(csv_path)
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new_file: w.writerow(header)
+        w.writerow(row)
 
 def _load_json(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -111,12 +160,30 @@ def apply_and_measure(tag=None, seed=None,
         # measure random mixing matrix on the PDs (7x7 typically)
         M = characterize_matrix_differential(scope, bus, avg=avg)
 
-        # 3) save both voltages and M
-        meta = {"tag": tag or "", "seed": seed, "scope1_channels": scope1_ch, "scope2_channels": scope2_ch}
+        # ---- NEW: compute metrics, incl. effective rank ----
+        m = metrics(M)
+        print(f"[Metrics] eff_rank={m['eff_rank']:.2f} | "
+              f"colcorr={m['mean_abs_colcorr']:.2f} | "
+              f"rowcorr={m['mean_abs_rowcorr']:.2f} | "
+              f"mu={m['mutual_coherence']:.2f}")
+
+        # 3) save both voltages and M (+ store metrics in meta)
+        meta = {
+            "tag": tag or "",
+            "seed": seed,
+            "scope1_channels": scope1_ch,
+            "scope2_channels": scope2_ch,
+            "metrics": m,
+        }
         paths = save_mesh_bundle(volts, M=M, meta=meta)
+
+        # 3.5) append one-line summary CSV for fast review
+        append_summary_row(os.path.join(OUT_DIR, "_summary.csv"),
+                           tag or "", seed, paths, m)
 
         # 4) return everything so you can use it immediately
         return volts, M, paths
+
     finally:
         try: scope.close()
         except: pass

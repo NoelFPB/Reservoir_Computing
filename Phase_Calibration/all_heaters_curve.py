@@ -360,6 +360,7 @@ INPUT_BIAS = {
 }
 
 MESH_HEATERS = list(range(0, 28))  # 0..27
+#MESH_HEATERS = {0,1,5,8,9,11,12,15,16,19,23,26}
 
 def _apply_biases(bus, bias_dict):
     if bias_dict:
@@ -380,17 +381,17 @@ def _phi_span_from_json(cal_json):
 def batch_calibrate(
     heaters=MESH_HEATERS,
     *,
-    vmin=0.20,
-    vmax=4.80,
-    points=121,
+    vmin=0.10,
+    vmax=4.90,
+    points=200,
     settle=0.020,
-    reads=3,
+    reads=5,
     outdir="calibration",
     resume=True,
     scope=None,
     bus = None,
     sleep_between=0.05,         # tiny pause between heaters
-    mid_bias_others=2.50        # hold non-swept mesh heaters here (optional)
+    mid_bias_others=0        # hold non-swept mesh heaters here (optional)
 ):
     """
     Calibrate all mesh heaters (0..27) one-by-one, saving JSONs in `outdir`
@@ -486,9 +487,9 @@ def main():
         heater=31,
         vmin=0.10,
         vmax=4.90,
-        points=121,
+        points=200,
         settle=0.020,
-        reads=3,
+        reads=4,
         channel=4,             # <- choose the PD channel you want
         outdir="calibration",
         scope1=None,
@@ -502,13 +503,15 @@ def main():
         batch_calibrate(
             heaters=list(range(28)),  # 0..27
             vmin=0.10, vmax=4.90,
-            points=121,               # 121–201 recommended
-            settle=0.020,
+            points=250,               # 121–201 recommended
+            settle=0.20,
             reads=3,
             scope=scope,
             bus = bus,
             outdir="calibration",
-            resume=True
+            resume=True,
+            mid_bias_others=0
+
         )
     finally:
         try: scope.close()

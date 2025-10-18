@@ -45,7 +45,7 @@ V_BIAS_INPUT = 2.50
 
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
 T_SETTLE = 0.03          # Time to let spatial pattern develop
-K_VIRTUAL = 1            # Still use virtual nodes for feature diversity
+K_VIRTUAL = 3            # Still use virtual nodes for feature diversity
 SETTLE = 0.006            # Faster sampling for spatial patterns, how ofter we measure the nodes
 READ_AVG = 1             # Fewer averages needed
 BURST = 1
@@ -54,7 +54,7 @@ SPATIAL_GAIN = 0.5       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 250 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
 
@@ -211,34 +211,34 @@ class PhotonicReservoir:
         #     for h in self.internal_heaters
         # }
         self.mesh_bias = {
-            "0": 0.9507404071835892,
-            "1": 1.0932397150515143,
-            "2": 2.046298758015133,
-            "3": 0.7237265439987379,
-            "4": 1.5676740978713732,
-            "5": 3.6964477053278983,
-            "6": 0.5404968917856676,
-            "7": 3.98191879729539,
-            "8": 3.271877047473385,
-            "9": 2.3500599319816016,
-            "10": 3.7750199891063603,
-            "11": 3.599436349666226,
-            "12": 2.729628118920606,
-            "13": 3.347606759419481,
-            "14": 4.822123647201673,
-            "15": 4.326004960367147,
-            "16": 3.1033748025628745,
-            "17": 0.44475956119859467,
-            "18": 1.5298731622924193,
-            "19": 2.724919587004184,
-            "20": 0.7681224718605201,
-            "21": 0.46857580185997405,
-            "22": 0.9735421775150003,
-            "23": 3.6141091070119833,
-            "24": 0.2356095595789659,
-            "25": 4.427942424914998,
-            "26": 4.3476534178304655,
-            "27": 3.5376746701167887
+            "0": 4.796350930812443,
+            "1": 1.6076502536270239,
+            "2": 2.383511208014088,
+            "3": 3.551003935907767,
+            "4": 4.053483654047246,
+            "5": 0.670394543914777,
+            "6": 3.715578857040116,
+            "7": 1.5323928915358995,
+            "8": 3.7097140270922657,
+            "9": 4.890000000000001,
+            "10": 1.3230155149724867,
+            "11": 4.0041804961291065,
+            "12": 3.1757363250853508,
+            "13": 2.58429098448964,
+            "14": 2.219189520661344,
+            "15": 4.424411576783365,
+            "16": 4.890000000000001,
+            "17": 1.5651924903701682,
+            "18": 4.49,
+            "19": 1.187314346890345,
+            "20": 2.377810818609803,
+            "21": 2.8891189414236087,
+            "22": 3.7498969658506893,
+            "23": 4.81713621727373,
+            "24": 4.588722210119075,
+            "25": 2.586307284997763,
+            "26": 4.181690348756786,
+            "27": 2.212052055752035
         }
         #self.mesh_bias = {h: 0.0 for h in self.internal_heaters}
         print(self.mesh_bias)
