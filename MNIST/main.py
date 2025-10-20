@@ -8,8 +8,9 @@ import matplotlib.pyplot as plt
 from  Lib.scope import  RigolDualScopes
 from Lib.heater_bus import HeaterBus
 from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import RidgeClassifier, RidgeClassifierCV
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif
+from pathlib import Path
 import os, time, json
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
@@ -26,7 +27,7 @@ MNIST Digit Classification using Photonic EML
 # CONFIG
 # ==========================
 # How many 7-wide row bands to use (2, 3, or 4 recommended)
-ROW_BANDS = 4   # 3 → 21 pixels → 3 chunks per image
+ROW_BANDS = 7   # 3 → 21 pixels → 3 chunks per image
 # When using chunk mode, keep projection off:
 PROJECTION_MODE = False
 
@@ -45,18 +46,25 @@ V_BIAS_INPUT = 2.50
 
 # Modified timing for spatial patterns (can be faster since no temporal sequence)
 T_SETTLE = 0.03          # Time to let spatial pattern develop
-K_VIRTUAL = 3            # Still use virtual nodes for feature diversity
+K_VIRTUAL = 5            # Still use virtual nodes for feature diversity
 SETTLE = 0.006            # Faster sampling for spatial patterns, how ofter we measure the nodes
 READ_AVG = 1             # Fewer averages needed
 BURST = 1
 # Spatial encoding parameters
-SPATIAL_GAIN = 0.5       # How strongly pixels drive heaters
+SPATIAL_GAIN = 0.15       # How strongly pixels drive heaters
 NOISE_LEVEL = 0.05        # Add slight randomization to prevent overfitting
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 250 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 500 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
+
+def _cache_token(value, digits=3):
+    formatted = f"{value:.{digits}f}"
+    formatted = formatted.rstrip("0").rstrip(".")
+    if not formatted:
+        formatted = "0"
+    return formatted.replace("-", "m").replace(".", "p")
 
 def zero_mean_orthogonal_masks(k, width=7, seed=42, max_tries=5000):
     rng = np.random.default_rng(seed)
@@ -211,34 +219,34 @@ class PhotonicReservoir:
         #     for h in self.internal_heaters
         # }
         self.mesh_bias = {
-            "0": 4.796350930812443,
-            "1": 1.6076502536270239,
-            "2": 2.383511208014088,
-            "3": 3.551003935907767,
-            "4": 4.053483654047246,
-            "5": 0.670394543914777,
-            "6": 3.715578857040116,
-            "7": 1.5323928915358995,
-            "8": 3.7097140270922657,
-            "9": 4.890000000000001,
-            "10": 1.3230155149724867,
-            "11": 4.0041804961291065,
-            "12": 3.1757363250853508,
-            "13": 2.58429098448964,
-            "14": 2.219189520661344,
-            "15": 4.424411576783365,
-            "16": 4.890000000000001,
-            "17": 1.5651924903701682,
-            "18": 4.49,
-            "19": 1.187314346890345,
-            "20": 2.377810818609803,
-            "21": 2.8891189414236087,
-            "22": 3.7498969658506893,
-            "23": 4.81713621727373,
-            "24": 4.588722210119075,
-            "25": 2.586307284997763,
-            "26": 4.181690348756786,
-            "27": 2.212052055752035
+            "0": 4.406996127104377,
+            "1": 4.890000000000001,
+            "2": 2.7939843085626257,
+            "3": 3.167400524158116,
+            "4": 0.40262217984061266,
+            "5": 1.1762001559388024,
+            "6": 1.690318961996769,
+            "7": 0.11,
+            "8": 2.0060493078483144,
+            "9": 3.117806285176484,
+            "10": 3.584691978533833,
+            "11": 2.613065008900305,
+            "12": 3.4139593331000353,
+            "13": 4.6261600000000005,
+            "14": 3.6245653079369062,
+            "15": 1.4075291261676262,
+            "16": 1.676667068629155,
+            "17": 2.952858427214628,
+            "18": 0.8895707442511243,
+            "19": 2.212990444047727,
+            "20": 2.576543415593057,
+            "21": 4.868780215068267,
+            "22": 4.692905587090785,
+            "23": 0.11,
+            "24": 3.7495589133138827,
+            "25": 2.863356703385314,
+            "26": 1.413919770333326,
+            "27": 2.1694327994347393
         }
         #self.mesh_bias = {h: 0.0 for h in self.internal_heaters}
         print(self.mesh_bias)
@@ -442,12 +450,12 @@ def build_features_classification(Z, quadratic=True, interaction=True):
 
 def train_mnist_classifier(X_features, y_labels):
     """
-    Train multi-class classifier for MNIST digits with data scaling.
+    Train multi-class classifier for MNIST digits with feature selection and in-pipeline scaling.
     """
     print("\nTraining MNIST classifier...")
     
     # Build expanded feature set
-    X_expanded = build_features_classification(X_features, quadratic=True, interaction=False)
+    X_expanded = build_features_classification(X_features, quadratic=True, interaction=True)
     print(f"Feature expansion: {X_features.shape[1]} → {X_expanded.shape[1]} features")
     
     # Split into train/test
@@ -459,24 +467,12 @@ def train_mnist_classifier(X_features, y_labels):
     print(f"Training set: {len(X_train)} samples")
     print(f"Test set: {len(X_test)} samples")
     
-    # --- Data Scaling Implementation ---
-    # Initialize the scaler
-    scaler = StandardScaler()
-    
-    # Fit the scaler on the training data and transform it
-    X_train_scaled = scaler.fit_transform(X_train)
-    
-    # Use the same scaler to transform the test data
-    X_test_scaled = scaler.transform(X_test)
-
-    # Note: For cross-validation, the scaler must be applied inside the CV loop
-    # or a pipeline should be used to prevent data leakage.
-    
-    # Try different classifiers
-    # classifiers = {
-    #     'Logistic Regression': LogisticRegression(max_iter=10000, random_state=42),
-    #     'Ridge Classifier': Ridge(alpha=1.0)
-    # }
+    feature_count = X_expanded.shape[1]
+    base_candidates = [30, 60, 90, 120, 150, 200]
+    candidate_ks = sorted({k for k in base_candidates if 0 < k < feature_count})
+    if not candidate_ks:
+        candidate_ks = [max(1, min(feature_count, 30))]
+    default_k = "all"
 
     # classifiers = {
     #     'Logistic Regression': LogisticRegression(
@@ -488,23 +484,30 @@ def train_mnist_classifier(X_features, y_labels):
     #         'Ridge (CV)': 
     #     RidgeClassifierCV(alphas=np.logspace(-3, 3, 13))}
     logreg_pipe = Pipeline([
+        ("variance", VarianceThreshold(threshold=0.0)),
+        ("kbest", SelectKBest(score_func=f_classif, k=default_k)),
         ("scaler", StandardScaler()),
         ("clf", LogisticRegression(
             max_iter=20000,
             random_state=42,
-            solver="lbfgs",
+            solver="lbfgs"
         ))
     ])
 
     logreg_grid = GridSearchCV(
         logreg_pipe,
-        param_grid={"clf__C": [0.03, 0.1, 0.3, 1.0]},
+        param_grid={
+            "kbest__k": candidate_ks + ["all"],
+            "clf__C": [0.03, 0.1, 0.3, 1.0, 3.0]
+        },
         cv=5,
         n_jobs=-1
     )
 
     # --- Ridge Classifier pipeline (CV inside) ---
     ridge_pipe = Pipeline([
+        ("variance", VarianceThreshold(threshold=0.0)),
+        ("kbest", SelectKBest(score_func=f_classif, k=default_k)),
         ("scaler", StandardScaler()),
         ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 13)))
     ])
@@ -518,39 +521,33 @@ def train_mnist_classifier(X_features, y_labels):
     results = {}
     
     for name, classifier in classifiers.items():
-            print(f"\nTraining {name}...")
-            
-            # Train on scaled data
-            classifier.fit(X_train_scaled, y_train)
-            
-            # Evaluate on scaled data
-            train_score = classifier.score(X_train_scaled, y_train)
-            test_score = classifier.score(X_test_scaled, y_test)
-            
-            # Predictions for detailed analysis
-            y_pred = classifier.predict(X_test_scaled)
-            
-            # # Fix for Ridge Classifier: Convert continuous output to integer labels
-            # if name == 'Ridge Classifier':
-            #     y_pred = np.rint(y_pred).astype(int) # rounds and casts to int
-                
-            results[name] = {
-                'classifier': classifier,
-                'train_accuracy': train_score,
-                'test_accuracy': test_score,
-                'y_pred': y_pred
-            }
-            
-            print(f"{name} Results:")
-            print(f"  Training accuracy: {train_score:.3f}")
-            print(f"  Test accuracy: {test_score:.3f}")
-            
-            # Cross-validation
-            # Using a pipeline to correctly scale data within each fold
-  
-            pipeline = make_pipeline(StandardScaler(), classifier)
-            cv_scores = cross_val_score(pipeline, X_expanded, y_labels, cv=5)
-            print(f"  Cross-validation: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+        print(f"\nTraining {name}...")
+        
+        classifier.fit(X_train, y_train)
+        estimator = classifier.best_estimator_ if isinstance(classifier, GridSearchCV) else classifier
+        
+        train_score = estimator.score(X_train, y_train)
+        test_score = estimator.score(X_test, y_test)
+        y_pred = estimator.predict(X_test)
+        best_params = getattr(classifier, "best_params_", None)
+        
+        cv_scores = cross_val_score(estimator, X_expanded, y_labels, cv=5)
+        
+        results[name] = {
+            'classifier': estimator,
+            'train_accuracy': train_score,
+            'test_accuracy': test_score,
+            'y_pred': y_pred,
+            'cv_scores': cv_scores,
+            'best_params': best_params
+        }
+        
+        print(f"{name} Results:")
+        print(f"  Training accuracy: {train_score:.3f}")
+        print(f"  Test accuracy: {test_score:.3f}")
+        print(f"  Cross-validation: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+        if best_params:
+            print(f"  Best params: {best_params}")
     
     # Select best classifier
     best_name = max(results.keys(), key=lambda k: results[k]['test_accuracy'])
@@ -699,16 +696,44 @@ def main_mnist():
     print("PHOTONIC RESERVOIR MNIST CLASSIFICATION")
     print("="*60)
     t0 = time.perf_counter()
+    reservoir = None
+    cache_dir = Path("cache")
+
     try:
         # Load data
         X_images, y_labels = load_mnist_data(N_SAMPLES_PER_DIGIT)
         print(f"Dataset loaded: {len(X_images)} samples, {len(np.unique(y_labels))} classes")
-        
-        # Initialize reservoir
-        reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
-        
-        # Process dataset through reservoir
-        X_features, y_processed = reservoir.process_dataset(X_images, y_labels, "TRAINING")
+
+        gain_token = _cache_token(SPATIAL_GAIN)
+        settle_token = _cache_token(SETTLE)
+        t_settle_token = _cache_token(T_SETTLE)
+        cache_name = (
+            f"mnist_features_rows{ROW_BANDS}_k{K_VIRTUAL}_n{N_SAMPLES_PER_DIGIT}"
+            f"_gain{gain_token}_settle{settle_token}_tsettle{t_settle_token}.npz"
+        )
+        cache_path = cache_dir / cache_name
+
+        if cache_path.exists():
+            print(f"[Cache] Loading reservoir features from {cache_path}")
+            with np.load(cache_path, allow_pickle=False) as cached:
+                X_features = cached["X"]
+                y_processed = cached["y"]
+        else:
+            # Initialize reservoir only when needed
+            reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
+
+            # Process dataset through reservoir
+            X_features, y_processed = reservoir.process_dataset(X_images, y_labels, "TRAINING")
+
+            if len(X_features):
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(cache_path, X=X_features, y=y_processed)
+                print(f"[Cache] Saved reservoir features to {cache_path}")
+
+            # Free hardware resources as soon as possible
+            if reservoir is not None:
+                reservoir.close()
+                reservoir = None
         
         if len(X_features) == 0:
             print("ERROR: No samples processed successfully!")
@@ -764,8 +789,6 @@ def main_mnist():
             }, f)
         print("Classifier saved to 'mnist_photonic_classifier.pkl'")
         
-        reservoir.close()
-        
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     except Exception as e:
@@ -773,13 +796,11 @@ def main_mnist():
         import traceback
         traceback.print_exc()
     finally:
-        try:
-            reservoir.close()
-        except:
-            pass
-
-        
-        reservoir.close()
+        if reservoir is not None:
+            try:
+                reservoir.close()
+            except Exception:
+                pass
 
 if __name__ == "__main__":  
     # For full MNIST classification
