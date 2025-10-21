@@ -22,10 +22,10 @@ START_VOLTAGES_JSON = ""   # e.g. "./meshes/mesh_20251018_113658_trial1_voltages
 # Hardware & measurement configs
 AVG_READS   = 2            # more averaging = less noise, slower
 SETTLE_S    = 0.05         # thermal settle after changing mesh
-DELTA_COL   = 0.15         # bump used inside characterize_matrix_differential
+DELTA_COL   = 0.15         # bump   used inside characterize_matrix_differential
 
 # Search strategy
-N_ITERS     = 50          # total proposals to try
+N_ITERS     = 150          # total proposals to try
 K_HEATERS   = 5            # heaters per proposal (small random subset)
 STEP_INIT   = 0.40         # initial step size (volts)
 STEP_MIN    = 0.1         # don’t shrink below this
@@ -207,11 +207,11 @@ def main():
             m1 = _ensure_metrics(M1b, metrics(M1b))
             #m1 = _ensure_metrics(M1, metrics(M1))
 
-            s1 = objective_from_metrics(m1, M1)
+            s1 = objective_from_metrics(m1, M1b)
 
             # decide acceptance
             T = temperature(it)
-            s0 = objective_from_metrics(m, M)
+            s0 = objective_from_metrics(m, Mb)
             delta = s1 - s0
             acc = maybe_accept(delta, T)
 
@@ -221,6 +221,7 @@ def main():
 
             if acc:
                 curr_volt, M, m = candidate_volt, M1, m1
+                Mb = M1
                 if s1 > best_score:
                     best_score = s1
                     best_volt  = dict(curr_volt)
@@ -234,6 +235,9 @@ def main():
                             for h in best_volt}
                 curr_volt = _clip_voltages(curr_volt)
                 bus.send(curr_volt)
+                M = _measure_M(scope, bus)
+                Mb = _balance_M(M)
+                m = _ensure_metrics(Mb, metrics(Mb))
                 continue
 
 
