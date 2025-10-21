@@ -10,7 +10,7 @@ class HeaterBus:
         
         print(f"Connecting to serial port {SERIAL_PORT}...")
         self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
-        time.sleep(0.2)
+        time.sleep(0.01)
         self.ser.reset_input_buffer()
         self.ser.reset_output_buffer()
 
