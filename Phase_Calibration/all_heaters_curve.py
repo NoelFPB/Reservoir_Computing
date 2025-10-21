@@ -384,13 +384,13 @@ def batch_calibrate(
     vmin=0.10,
     vmax=4.90,
     points=200,
-    settle=0.020,
+    settle=1,
     reads=5,
     outdir="calibration",
     resume=True,
     scope=None,
     bus = None,
-    sleep_between=0.05,         # tiny pause between heaters
+    sleep_between=1,         # tiny pause between heaters
     mid_bias_others=0        # hold non-swept mesh heaters here (optional)
 ):
     """
