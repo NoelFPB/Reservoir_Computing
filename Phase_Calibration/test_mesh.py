@@ -4,7 +4,7 @@ import numpy as np, os, json
 import matplotlib.pyplot as plt
 
 # === 👇 EDIT THIS LINE ONLY 👇 ===
-M_PATH = "./meshes/mesh_20251018_213709_optimized_M.npy"
+M_PATH = "./meshes/mesh_20251028_152022_trial1_M.npy"
 # =================================
 
 EPS = 1e-12

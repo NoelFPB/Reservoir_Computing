@@ -8,17 +8,19 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 
 # --- your hardware I/O drivers ---
-from MNIST.Lib.scope import RigolScope
-from MNIST.Lib.heater_bus import HeaterBus
+from Lib.scope import RigolDualScopes
+from Lib.heater_bus import HeaterBus
 
 # =========================================================
 # CONFIG
 # =========================================================
-SCOPE_CHANNELS      = (1, 2, 3, 4)
+SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
+SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
+
 INPUT_HEATERS       = (28, 29, 30, 31, 32, 33, 34)     # 7 inputs
 ALL_HEATERS         = tuple(range(35))                  # includes internal mesh heaters
 
-V_MIN, V_MAX        = 0.10, 4.90
+V_MIN, V_MAX        = 1.0, 4.5
 V_BIAS_INPUT        = 2.50
 V_BIAS_INTERNAL     = 2.50
 MESH_NOISE_STD      = 0.4                               # keep headroom, avoid rails
@@ -106,13 +108,13 @@ class PhotonicESN7Wide:
     - Uses FINAL STATE per image for classification.
     - Optional virtual nodes (K_VIRTUAL): multiple quick reads per row are averaged into z_t.
     """
-    def __init__(self, input_heaters, all_heaters, scope_channels,
+    def __init__(self, input_heaters, all_heaters,
                  leak=LEAK, alpha=ALPHA, gamma=GAMMA, bias=BIAS_TERM, seed=SEED):
         self.rng = np.random.default_rng(seed)
 
         self.input_heaters    = list(input_heaters)
         self.internal_heaters = [h for h in all_heaters if h not in self.input_heaters]
-        self.scope            = RigolScope(scope_channels)
+        self.scope = RigolDualScopes(SCOPE1_CHANNELS, SCOPE2_CHANNELS, serial_scope1='HDO1B244000779')
         self.bus              = HeaterBus()
 
         # Mesh bias with narrow spread
@@ -128,7 +130,7 @@ class PhotonicESN7Wide:
         time.sleep(0.2)
 
         # ESN params
-        self.n_state = len(scope_channels)  # state dimension equals PD channels
+        self.n_state = 7  # state dimension equals PD channels
         self.x = np.zeros(self.n_state, dtype=float)
 
         self.leak  = float(leak)
@@ -300,7 +302,7 @@ def main():
     X49, y = load_mnist_resized_7x7(N_SAMPLES_PER_DIGIT, SEED)
     print(f"Dataset: {len(X49)} samples, classes: {sorted(set(y))}")
 
-    esn = PhotonicESN7Wide(INPUT_HEATERS, ALL_HEATERS, SCOPE_CHANNELS,
+    esn = PhotonicESN7Wide(INPUT_HEATERS, ALL_HEATERS,
                            leak=LEAK, alpha=ALPHA, gamma=GAMMA, bias=BIAS_TERM, seed=SEED)
     try:
         # Generate final-state features from hardware
@@ -318,7 +320,7 @@ def main():
         print("\n" + "="*68)
         print(" SUMMARY ")
         print("="*68)
-        print(f"Final-state dim: {Xs.shape[1]} = #scope channels ({len(SCOPE_CHANNELS)})")
+        print(f"Final-state dim: {Xs.shape[1]} = #scope channels ({(7)})")
         print(f"Approx time/image: ~{per_img_time:.2f}s")
         print(f"Best test accuracy: {max(r['acc_test'] for r in results.values()):.3f}")
         print("="*68)

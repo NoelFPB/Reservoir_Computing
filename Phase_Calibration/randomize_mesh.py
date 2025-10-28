@@ -14,7 +14,7 @@ MESH_HEATERS = list(range(28))                 # 0..27
 INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]   # 7 inputs → 7 PDs
 
 # your established input biases (keep them stable)
-INPUT_BIAS = {28:1.732, 29:1.764, 30:2.223, 31:2.372, 32:1.881, 33:2.436, 34:2.852}
+INPUT_BIAS = {28:0.1, 29:0.1, 30:0.1, 31:0.1, 32:0.1, 33:0.1, 34:0.1}
 
 def metrics(M):
     """Return effective rank and a few quick quality metrics."""

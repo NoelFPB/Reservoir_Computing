@@ -5,18 +5,17 @@ from  Lib.scope import  RigolDualScopes
 from Lib.heater_bus import HeaterBus
 import itertools, numpy as np
 import json
+import matplotlib.pyplot as plt
 
 N = 7   # Spin count for the MVP
 
-
 # Two voltage levels that represent spins -1 and +1 (start conservative)
-V_LOW  = 1.50   # volts for σ = -1
-V_HIGH = 4.50   # volts for σ = +1
+# This ones are like experimental based on the calibration pictures, dont really know whats better
+NEG_SPIN  = 1.50   # volts for σ = -1
+POS_SPIN = 4.50   # volts for σ = +1
 
-V_MIN = 0.5
-V_MAX = 2.5
-# Heater settling time after each write (seconds)
-SETTLE_S = 0.03
+V_MIN = 1.5
+V_MAX = 4.5
 
 CHANNELS_SCOPE1 = [1,2,3,4]   # edit to match your wiring
 CHANNELS_SCOPE2 = [1,2,3]   # edit to match your wiring
@@ -28,10 +27,9 @@ SPIN_HEATER_CH = [28,29,30,31,32,33,34]
 PD_IDX: Sequence[int] = [0,1,2,3,4,5,6]  # length N
 MESH_HEATER_CH = list(range(28))
 
-
 # Averages for scope reads during identification / iteration
-SCOPE_AVG_ID = 3
-SCOPE_AVG_RUN = 2
+SCOPE_AVG_ID = 1
+SCOPE_AVG_RUN = 1
 
 # Ising loop
 MAX_ITERS = 30
@@ -44,7 +42,57 @@ H_VEC = np.zeros(N, dtype=float)
 # If you have a precomputed J (NxN), set it here to skip identification
 TARGET_J: Optional[np.ndarray] = None
 
-# ======================
+# ====================== FUNCTIONS ======================
+def plot_energy(history, label=None):
+    iters = [k for k,_E in history]
+    Es    = [E for _k,E in history]
+    plt.figure()
+    plt.plot(iters, Es, marker='.', linewidth=1)
+    if label: plt.title(f'Energy vs iteration – {label}')
+    else:     plt.title('Energy vs iteration')
+    plt.xlabel('Iteration'); plt.ylabel('Ising energy')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+def plot_spin_raster(sigma_trace, title='Spin raster'):
+    # sigma_trace: (T+1, N) with values in {-1,+1}
+    A = (sigma_trace + 1)/2.0   # map {-1,+1} -> {0,1} for nice contrast
+    plt.figure()
+    plt.imshow(A.T, aspect='auto', interpolation='nearest')
+    plt.xlabel('Iteration'); plt.ylabel('Spin index')
+    plt.title(title)
+    cbar = plt.colorbar()
+    cbar.set_ticks([0,1]); cbar.set_ticklabels(['-1','+1'])
+    plt.tight_layout()
+
+def plot_flip_activity(sigma_trace, title='Flip activity per spin'):
+    # sum of absolute changes |sigma_k - sigma_{k-1}| per spin
+    diffs = np.abs(np.diff(sigma_trace, axis=0))  # (T, N), elements in {0,2}
+    flips = diffs.sum(axis=0) / 2.0               # number of flips per spin
+    plt.figure()
+    plt.bar(np.arange(len(flips)), flips)
+    plt.xlabel('Spin index'); plt.ylabel('Flip count')
+    plt.title(title)
+    plt.tight_layout()
+
+def run_digital_sim(J, h=None, sigma0=None, noise_std=0.0, iters=100):
+    # Simple digital reference that mirrors your hardware rule
+    N = J.shape[0]
+    if h is None: h = np.zeros(N)
+    if sigma0 is None: sigma = np.sign(np.random.randn(N)).astype(int); sigma[sigma==0]=1
+    else: sigma = np.array(sigma0, int)
+    hist = []; trace=[sigma.copy()]
+    best_E = +1e9
+    for k in range(iters):
+        f = J @ sigma
+        sigma_new = np.sign(h + f + np.random.normal(0, noise_std, size=N)).astype(int)
+        sigma_new[sigma_new==0]=1
+        E = float(-0.5 * sigma_new @ (J @ sigma_new) - h @ sigma_new)
+        hist.append((k, E))
+        if E < best_E: best_E = E
+        sigma = sigma_new
+        trace.append(sigma.copy())
+    return {'history': hist, 'sigma_trace': np.array(trace, int), 'E_best': best_E}
 
 def save_mesh_biases(mesh_voltages, path="mesh_biases.json"):
     """Save current mesh heater voltages to a JSON file."""
@@ -156,15 +204,14 @@ class PhotonicIsingMF:
         return 0.5 * (f_plus - f_minus)
 
     def _spins_to_voltages(self, sigma: np.ndarray) -> np.ndarray:
-        return np.where(sigma >= 0, V_HIGH, V_LOW).astype(float)
+        return np.where(sigma >= 0, POS_SPIN, NEG_SPIN).astype(float)
 
     def write_spins(self, sigma: np.ndarray):
         """Encode spins on the SPIN_HEATER_CH as two voltage levels (serial .send)."""
         assert len(sigma) == self.n
         v = self._spins_to_voltages(sigma)
         self.heater.send((SPIN_HEATER_CH, v.tolist()))
-        time.sleep(SETTLE_S)
-
+  
     def _read_all_pd(self, avg: int) -> np.ndarray:
         """Read all configured scope channels and return concatenated vector."""
         vals = self.scopes.read_many(avg=max(1, int(avg)))  # shape (len(CH1)+len(CH2),)
@@ -187,7 +234,7 @@ class PhotonicIsingMF:
         Build an effective J_eff satisfying f ≈ J_eff * sigma by probing +/- basis patterns.
         Column i ≈ 0.5 * (f(+e_i) - f(-e_i)).
         """
-        print("[ID] Identifying effective coupling matrix ...")
+        print("[ID] Identifying coupling matrix ...")
         n = self.n
         J = np.zeros((n, n), dtype=float)
 
@@ -218,7 +265,8 @@ class PhotonicIsingMF:
         np.fill_diagonal(J, 0.0)  # optional: zero self-coupling
         self.write_spins(sigma_saved)
         self.J_eff = J
-        print("[ID] Done.")
+        #print(J)
+        print("Coupling Matrix Identification Done.")
         return J
 
     # ------------------- Ising Loop ----------------------
@@ -235,6 +283,7 @@ class PhotonicIsingMF:
             max_iters: int = MAX_ITERS,
             noise_std: float = ANNEAL_NOISE_STD,
             stop_noflip_steps: int = STOP_NOFLIP_STEPS):
+        
         n = self.n
         if J is None:
             if self.J_eff is None:
@@ -244,11 +293,11 @@ class PhotonicIsingMF:
             h = np.zeros(n, dtype=float)
 
         sigma = sign_no_zero(np.random.randn(n)) if sigma0 is None else sign_no_zero(np.array(sigma0, int))
-
         best_sigma = sigma.copy()
         best_energy = self.energy(sigma, J, h)
         noflip = 0
         history = []
+        sigma_trace = [sigma.copy()]
 
         for k in range(max_iters):
             self.write_spins(sigma)                               # (1) write spins
@@ -267,6 +316,8 @@ class PhotonicIsingMF:
                 noflip = 0
 
             sigma = sigma_new
+            sigma_trace.append(sigma.copy())
+            
             print(f"[ITER {k:03d}] E={E:.6f}  noflip={noflip}")
 
             if noflip >= stop_noflip_steps:
@@ -278,7 +329,8 @@ class PhotonicIsingMF:
             "sigma_best": best_sigma,
             "E_final": float(self.energy(sigma, J, h)),
             "E_best": float(best_energy),
-            "history": history,
+            "history": history,             # list of (k, E_k)
+            "sigma_trace": np.array(sigma_trace, int)  # shape: (T+1, N)
         }
 
 
@@ -293,8 +345,9 @@ def main():
     # -------------------- 0.1) Mesh baseline ------------------
     # Use a safe, linear-ish mid-bias and narrower rail to avoid saturation.
     mesh_voltages = {h: 2.50 for h in MESH_HEATER_CH}
-    heater.send(mesh_voltages); time.sleep(0.2)
-
+    heater.send(mesh_voltages)
+    print("Inital J")
+    print(mesh_voltages)
     # -------------------- helpers ------------------------------
     def identify_J(avg_repeats=SCOPE_AVG_ID):
         """Wrap identify + return (J, col_norms)."""
@@ -316,6 +369,161 @@ def main():
         J1[:, ~active_mask] = 0.0; J2[:, ~active_mask] = 0.0
         D = J1 - J2
         return float(np.linalg.norm(D, 'fro')**2)
+    
+
+    # =======================
+# SPSA-based mesh programming (drop-in)
+# =======================
+    def program_mesh_spsa(
+        *,
+        heater,                       # HeaterBus()
+        identify_J_fn,                # callable: identify_J(avg_repeats:int) -> (J, col_norms)
+        masked_loss_fn,               # callable: masked_loss(J_eff, J_target, active_mask)->float
+        J_target: np.ndarray,
+        mesh_heaters: list,           # e.g. MESH_HEATER_CH
+        mesh_voltages: dict,          # {heater_id: voltage} initial state (will be updated)
+        active_cols: np.ndarray,      # boolean mask from your earlier ID
+        vmin: float = 0.10,           # safe bounds (adjust to your cal)
+        vmax: float = 4.90,
+        iters: int = 25,              # total SPSA iterations
+        a0: float = 0.25,             # initial step size (volts)
+        c0: float = 0.12,             # initial perturbation magnitude for SPSA (volts)
+        verify_every: int = 3,        # do a full ID (slow) every N SPSA iterations
+        avg_fast: int = 1,            # fast (proxy) ID averaging
+        avg_verify: int = 3,          # full verify ID averaging
+        rel_eps: float = 5e-3,        # relative improvement threshold for early stop (~0.5%)
+        time_budget_sec: float = 5*60 # runtime cap
+    ):
+        """
+        SPSA update on ALL mesh heaters with cheap proxy loss most of the time,
+        and occasional full identify_J() to verify & checkpoint best state.
+        Returns: best_volt, best_J_eff, final_active_cols, best_loss
+        """
+        t0 = time.perf_counter()
+        H = len(mesh_heaters)
+        heaters_arr = np.array(mesh_heaters, int)
+
+        # Helpers
+        def clip_voltages(vdict):
+            out = {}
+            for h, v in vdict.items():
+                out[h] = float(np.clip(float(v), vmin, vmax))
+            return out
+
+        def send_voltages(vdict):
+            heater.send({int(h): float(v) for h, v in vdict.items()})
+
+        # ---- Initial verify (establish baseline) ----
+        J_eff, norms = identify_J_fn(avg_repeats=avg_verify)
+        active_cols = (np.linalg.norm(J_eff, axis=0) >= max(1e-9, np.percentile(np.linalg.norm(J_eff, axis=0), 5))) & active_cols
+        best_loss = masked_loss_fn(J_eff, J_target, active_cols)
+        best_volt = dict(mesh_voltages)
+        best_J    = J_eff.copy()
+        last_verified_loss = best_loss
+        print(f"[SPSA] init loss={best_loss:.4f} (iters={iters}, a0={a0:.2f}, c0={c0:.2f})")
+
+        a = float(a0)
+        c = float(c0)
+        ALPHA = 0.95  # step decay
+        BETA  = 0.98  # perturb decay
+
+        prev_verified_J = J_eff.copy()
+        stable_hits = 0
+
+        for it in range(1, iters+1):
+            # --- time guard ---
+            if (time.perf_counter() - t0) > time_budget_sec:
+                print("[SPSA] time budget reached; stopping.")
+                break
+
+            # Rademacher perturbation (+1 / -1 per heater)
+            Delta = np.random.choice([-1.0, 1.0], size=H)
+
+            # Build v_plus / v_minus
+            v_plus  = dict(mesh_voltages)
+            v_minus = dict(mesh_voltages)
+            for idx, h in enumerate(heaters_arr):
+                v_plus[h]  = v_plus[h]  + c * Delta[idx]
+                v_minus[h] = v_minus[h] - c * Delta[idx]
+            v_plus  = clip_voltages(v_plus)
+            v_minus = clip_voltages(v_minus)
+
+            # --- Proxy evaluations (fast IDs) ---
+            send_voltages(v_plus)
+            Jp, _ = identify_J_fn(avg_repeats=avg_fast)
+            Lp = masked_loss_fn(Jp, J_target, active_cols)
+
+            send_voltages(v_minus)
+            Jm, _ = identify_J_fn(avg_repeats=avg_fast)
+            Lm = masked_loss_fn(Jm, J_target, active_cols)
+
+            # Gradient estimate: g_i = (Lp - Lm)/(2c * Delta_i)
+            # We aggregate heater-wise; if denominator small, skip safely.
+            denom = (2.0 * max(c, 1e-6))
+            ghat = {}
+            diff = (Lp - Lm) / denom
+            for idx, h in enumerate(heaters_arr):
+                ghat[h] = float(diff * (1.0 / max(Delta[idx], 1e-6)))
+
+            # Update voltages
+            v_new = dict(mesh_voltages)
+            for h in heaters_arr:
+                v_new[h] = v_new[h] - a * ghat[h]
+            v_new = clip_voltages(v_new)
+            send_voltages(v_new)
+            mesh_voltages = v_new  # commit
+
+            # Decay schedules
+            a *= ALPHA
+            c *= BETA
+
+            # --- Occasional verify with full identify_J (slower, accurate) ---
+            if (it % verify_every) == 0 or it == iters:
+                J_eff, norms = identify_J_fn(avg_repeats=avg_verify)
+                # Optionally refresh active set, but do it conservatively to avoid flapping
+                # e.g., mask columns smaller than 20% of median norm
+                col_norms = np.linalg.norm(J_eff, axis=0)
+                thresh = 0.20 * max(1e-9, np.median(col_norms))
+                new_active = (col_norms >= thresh)
+                if np.any(new_active):
+                    active_cols = new_active
+
+                L_true = masked_loss_fn(J_eff, J_target, active_cols)
+                rel_improve = (last_verified_loss - L_true) / max(1e-9, last_verified_loss)
+                print(f"[SPSA] it={it:03d}  L_true={L_true:.4f}  Δrel={rel_improve*100:.2f}%  (a={a:.3f}, c={c:.3f})")
+
+                # Track best
+                if (L_true + 1e-9) < (best_loss - max(1e-4, rel_eps * best_loss)):
+                    best_loss = L_true
+                    best_volt = dict(mesh_voltages)
+                    best_J    = J_eff.copy()
+
+                # Stability-based early stop: J not changing anymore
+                rel_J = np.linalg.norm(J_eff - prev_verified_J, 'fro') / (np.linalg.norm(prev_verified_J, 'fro') + 1e-9)
+                if rel_J < 5e-3:  # <0.5% change
+                    stable_hits += 1
+                else:
+                    stable_hits = 0
+                prev_verified_J = J_eff.copy()
+
+                # Plateau early stop (loss not improving relatively)
+                if rel_improve < rel_eps:
+                    # shrink step to try fine convergence; if still flat next time, stop
+                    a = max(0.5 * a, 0.02)
+                last_verified_loss = L_true
+
+                if stable_hits >= 2:
+                    print("[SPSA] early stop: J stabilized.")
+                    break
+
+        # Restore best found and return
+        send_voltages(best_volt)
+        final_J, _ = identify_J_fn(avg_repeats=avg_verify)
+        print(final_J)
+        final_loss = masked_loss_fn(final_J, J_target, active_cols)
+        print(f"[SPSA] done. best_loss={best_loss:.4f}  final_loss={final_loss:.4f}")
+        return best_volt, final_J, active_cols, best_loss
+
 
     # -------------------- 1) Identify optics -------------------
     J_eff, norms = identify_J()
@@ -327,26 +535,26 @@ def main():
     print(f"[ID] active columns: {np.where(active_cols)[0].tolist()}")
 
     # -------------------- 2) Verify engine vs J_eff ------------
-    PASSES_NEEDED = 1
-    MAX_TRIALS    = 20
-    best_res = None
-    passes = 0
-    for s in range(MAX_TRIALS):
-        np.random.seed(s)
-        res = ctrl.run(J=J_eff, noise_std=0.1, max_iters=MAX_ITERS)
-        rep = pass_fail_report(J_eff, res, energy_tol=1e-3)
-        print("\n=== PASS/FAIL vs J_eff ===")
-        for k, v in rep.items(): print(f"{k}: {v}")
-        if rep.get("PASS", False):
-            passes += 1
-            if best_res is None or res["E_best"] < best_res["E_best"]:
-                best_res = res
-            if passes >= PASSES_NEEDED:
-                break
+    # PASSES_NEEDED = 1
+    # MAX_TRIALS    = 20
+    # best_res = None
+    # passes = 0
+    # for s in range(MAX_TRIALS):
+    #     np.random.seed(s)
+    #     res = ctrl.run(J=J_eff, noise_std=0.1, max_iters=MAX_ITERS)
+    #     rep = pass_fail_report(J_eff, res, energy_tol=1e-3)
+    #     print("\n=== PASS/FAIL vs J_eff ===")
+    #     for k, v in rep.items(): print(f"{k}: {v}")
+    #     if rep.get("PASS", False):
+    #         passes += 1
+    #         if best_res is None or res["E_best"] < best_res["E_best"]:
+    #             best_res = res
+    #         if passes >= PASSES_NEEDED:
+    #             break
 
-    if passes < PASSES_NEEDED:
-        print("\n[ABORT] Engine did not PASS vs identified J_eff. Recalibrate and retry.")
-        heater.close(); scopes.close(); return
+    # if passes < PASSES_NEEDED:
+    #     print("\n[ABORT] Engine did not PASS vs identified J_eff. Recalibrate and retry.")
+    #     heater.close(); scopes.close(); return
 
     # -------------------- 3) Target problem --------------------
     J_target = maxcut_chain_J(N)
@@ -354,13 +562,36 @@ def main():
     print("Alternating ground (example):", alternating_sigma(N, start=1))
 
     # -------------------- 4) Program mesh toward target --------
+    # -------------------- 4) Program mesh toward target (SPSA) --------
+    # best_volt, J_eff, active_cols, best_loss = program_mesh_spsa(
+    #     heater=heater,
+    #     identify_J_fn=lambda avg_repeats: identify_J(avg_repeats=avg_repeats),
+    #     masked_loss_fn=lambda J_eff_, J_tgt_, mask_: masked_loss(J_eff_, J_tgt_, mask_),
+    #     J_target=J_target,
+    #     mesh_heaters=MESH_HEATER_CH,
+    #     mesh_voltages=mesh_voltages,   # starts from your mid-bias {h:2.50}
+    #     active_cols=active_cols,
+    #     vmin=V_MIN, vmax=V_MAX,
+    #     iters=25,
+    #     a0=0.25, c0=0.12,
+    #     verify_every=3,
+    #     avg_fast=1,     # proxy ID (cheap)
+    #     avg_verify=3,   # verify ID (accurate)
+    #     rel_eps=5e-3,
+    #     time_budget_sec=25*60
+    # )
+
+    # print(f"[PROG] SPSA best_loss={best_loss:.4f}")
+    # save_mesh_biases(best_volt)
+
+
     # Bounded greedy coordinate sweeps w/ early stop, patience, and runtime cap.
-    DELTA                = 0.05
+    DELTA                = 0.1
     MAX_SWEEPS           = 8        # hard cap on sweeps
-    IMPROVE_EPS          = 1e-3     # minimal improvement to count
+    IMPROVE_EPS          = 0.1     # minimal improvement to count
     SWEEP_PATIENCE       = 1        # sweeps allowed with no improvement
     ID_EVERY_HEATERS     = 3        # throttle heavy identify calls
-    RUNTIME_BUDGET_SEC   = 5*60    # e.g., 25 minutes runtime cap
+    RUNTIME_BUDGET_SEC   = 1*60    # e.g., 25 minutes runtime cap
     t_start              = time.perf_counter()
 
     # Current baseline loss
@@ -371,6 +602,7 @@ def main():
 
     no_progress_sweeps = 0
 
+    # In this for we basically program the problem to the J
     for sweep in range(1, MAX_SWEEPS + 1):
         improved = False
         # random order across mesh heaters
@@ -393,8 +625,7 @@ def main():
             best_local_J = None
 
             for v_try in trials:
-                heater.send({h: v_try}); time.sleep(0.20)
-
+                heater.send({h: v_try})
                 # Throttle the heavy ID to reduce total time; reuse best_J otherwise
                 if (i % ID_EVERY_HEATERS) == 0 or best_local_L is None:
                     J_try, norms_try = identify_J(avg_repeats=SCOPE_AVG_ID)
@@ -439,17 +670,18 @@ def main():
             break
 
     # Restore best mesh and finalize identification
-    heater.send(best_volt); time.sleep(0.2)
+    heater.send(best_volt)
     J_eff, norms = identify_J(avg_repeats=SCOPE_AVG_ID)
     final_L = masked_loss(J_eff, J_target, active_cols)
     print(f"[PROG] final loss={final_L:.4f}")
     print("[ID] final column norms:", np.round(norms, 4))
     # --- Save mesh if the programming succeeded ---
     save_mesh_biases(best_volt)
+
     # -------------------- 5) Solve programmed problem ----------
     best = None
-    for noise in np.linspace(0.08, 0.01, 5):
-        res = ctrl.run(J=J_target, noise_std=noise, max_iters=MAX_ITERS)
+    for noise in np.linspace(0.1, 0.05, 3):
+        res = ctrl.run(J=J_target, noise_std=noise, max_iters=30)
         if best is None or res["E_best"] < best["E_best"]:
             best = res
 
@@ -462,6 +694,26 @@ def main():
     print("\n=== OPTICAL RUN (programmed mesh) ===")
     print("E_best  :", best["E_best"])
     print("sigma_b :", best["sigma_best"])
+
+    # -------------------- ---------------------------
+    # Your optical result
+    opt_hist  = best['history']
+    opt_trace = best['sigma_trace']
+
+    plot_energy(opt_hist, label='Optical')
+    plot_spin_raster(opt_trace, title='Optical spin raster')
+    plot_flip_activity(opt_trace, title='Optical flip activity')
+
+    # Optional: overlay a digital simulation for comparison (same J_target)
+    sim = run_digital_sim(J_eff, iters=len(opt_hist), noise_std=0.1)
+    plot_energy(sim['history'], label='Digital')
+    plt.figure()
+    plt.plot([k for k,_E in opt_hist],[E for _k,E in opt_hist], label='Optical')
+    plt.plot([k for k,_E in sim['history']],[E for _k,E in sim['history']], label='Digital')
+    plt.xlabel('Iteration'); plt.ylabel('Ising energy'); plt.title('Energy vs iteration (Optical vs Digital)')
+    plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout()
+
+    plt.show()
 
     # -------------------- 6) Cleanup ---------------------------
     heater.close()

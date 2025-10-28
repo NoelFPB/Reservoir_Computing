@@ -25,14 +25,14 @@ V_BIAS_INTERNAL = 2.50
 V_BIAS_INPUT = 2.50
 
 ROW_BANDS = 7 # How many 7-wide row bands to use (2, 3, or 4 recommended)
-K_VIRTUAL = 1            # Still use virtual nodes for feature diversity
+K_VIRTUAL = 5           # Still use virtual nodes for feature diversity
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
-SPATIAL_GAIN = 0     # How strongly pixels drive heaters
+SPATIAL_GAIN = 0.15     # How strongly pixels drive heaters
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 1000 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 150 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
       
 def zero_mean_orthogonal_masks(k, width=7, seed=42, max_tries=5000):
@@ -175,47 +175,54 @@ class PhotonicReservoir:
         #     for h in self.internal_heaters
         # }
         self.mesh_bias = {
-            "0": 4.406996127104377,
-            "1": 4.890000000000001,
-            "2": 2.7939843085626257,
-            "3": 3.167400524158116,
-            "4": 0.40262217984061266,
-            "5": 1.1762001559388024,
-            "6": 1.690318961996769,
-            "7": 0.11,
-            "8": 2.0060493078483144,
-            "9": 3.117806285176484,
-            "10": 3.584691978533833,
-            "11": 2.613065008900305,
-            "12": 3.4139593331000353,
-            "13": 4.6261600000000005,
-            "14": 3.6245653079369062,
-            "15": 1.4075291261676262,
-            "16": 1.676667068629155,
-            "17": 2.952858427214628,
-            "18": 0.8895707442511243,
-            "19": 2.212990444047727,
-            "20": 2.576543415593057,
-            "21": 4.868780215068267,
-            "22": 4.692905587090785,
-            "23": 0.11,
-            "24": 3.7495589133138827,
-            "25": 2.863356703385314,
-            "26": 1.413919770333326,
-            "27": 2.1694327994347393
-        }        
+            h: 0.1
+            for h in self.internal_heaters
+        }
+
+        # self.mesh_bias = {
+        #     "0": 4.406996127104377,
+        #     "1": 4.890000000000001,
+        #     "2": 2.7939843085626257,
+        #     "3": 3.167400524158116,
+        #     "4": 0.40262217984061266,
+        #     "5": 1.1762001559388024,
+        #     "6": 1.690318961996769,
+        #     "7": 0.11,
+        #     "8": 2.0060493078483144,
+        #     "9": 3.117806285176484,
+        #     "10": 3.584691978533833,
+        #     "11": 2.613065008900305,
+        #     "12": 3.4139593331000353,
+        #     "13": 4.6261600000000005,
+        #     "14": 3.6245653079369062,
+        #     "15": 1.4075291261676262,
+        #     "16": 1.676667068629155,
+        #     "17": 2.952858427214628,
+        #     "18": 0.8895707442511243,
+        #     "19": 2.212990444047727,
+        #     "20": 2.576543415593057,
+        #     "21": 4.868780215068267,
+        #     "22": 4.692905587090785,
+        #     "23": 0.11,
+        #     "24": 3.7495589133138827,
+        #     "25": 2.863356703385314,
+        #     "26": 1.413919770333326,
+        #     "27": 2.1694327994347393
+        # }        
+
+
         # Input heater baseline
         # This is the non linear inout bias determined
-        # self.input_bias = {
-        #     28: 1.732,
-        #     29: 1.764,
-        #     30: 2.223,
-        #     31: 2.372,
-        #     32: 1.881,
-        #     33: 2.436,
-        #     34: 2.852}
+        self.input_bias = {
+            28: 1.732,
+            29: 1.764,
+            30: 2.223,
+            31: 2.372,
+            32: 1.881,
+            33: 2.436,
+            34: 2.852}
         
-        self.input_bias = {h: 0.1 for h in range(28, 35)}
+        #self.input_bias = {h: 0.1 for h in range(28, 35)}
 
         # Mask selection
         #self.mask = zero_mean_orthogonal_masks(K_VIRTUAL - 1, len(self.input_heaters), seed=42,)
@@ -243,7 +250,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         super().__init__(input_heaters, all_heaters)
         print("[MNIST] Photonic reservoir initialized for spatial classification")
     
-    def process_spatial_pattern(self, image_pixels):
+    def FULLRANGE_process_spatial_pattern(self, image_pixels):
         # --- config pulled from globals (unchanged) ---
         K_req   = int(globals().get("K_VIRTUAL", 1))
         readavg = int(globals().get("READ_AVG", 1))
@@ -299,7 +306,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
 
         return np.asarray(features, float).ravel()
 
-    def OG_process_spatial_pattern(self, image_pixels):
+    def process_spatial_pattern(self, image_pixels):
  
         K_req   = int(globals().get("K_VIRTUAL", 1))        # requested K
         readavg = int(globals().get("READ_AVG", 1))
