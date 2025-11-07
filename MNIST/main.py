@@ -4,8 +4,6 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 from sklearn.datasets import fetch_openml
-from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
-from sklearn.linear_model import LogisticRegression, RidgeClassifierCV
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
@@ -14,7 +12,9 @@ from Lib.scope import RigolDualScopes
 from Lib.heater_bus import HeaterBus
 import pickle
 import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression, RidgeClassifierCV
+from sklearn.linear_model import LinearRegression, RidgeClassifierCV, LogisticRegression
+
+FEATURE_STORE = os.path.join("MNIST", "feature_store_gain0.6_row6_mask1.npz")
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
@@ -25,16 +25,56 @@ V_MIN, V_MAX = 1.10, 4.50
 V_BIAS_INTERNAL = 0.1
 V_BIAS_INPUT = 3.4
 
-ROW_BANDS = 4 # How many 7-wide row bands to use (2, 3, or 4 recommended)
-K_VIRTUAL = 4           # Still use virtual nodes for feature diversity
+ROW_BANDS = 6 # How many 7-wide row bands to use 
+K_VIRTUAL = 1           # Still use virtual nodes for feature diversity
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
 SPATIAL_GAIN = 0.6     # How strongly pixels drive heaters Now should be less than 0.64
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 80 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 500 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
+
+#
+def load_feature_store(path=FEATURE_STORE):
+    if os.path.exists(path):
+        d = np.load(path)
+        return d["X"], d["y"]
+    return None, None
+
+def save_feature_store(X, y, path=FEATURE_STORE):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(path, X=X.astype(np.float32), y=y.astype(np.int64))
+    print(f"[FeatureStore] Saved {len(y)} samples to {path}")
+
+def append_feature_store(X_new, y_new, path=FEATURE_STORE):
+    X_old, y_old = load_feature_store(path)
+    if X_old is None:
+        X_all, y_all = X_new, y_new
+    else:
+        X_all = np.concatenate([X_old, X_new], axis=0)
+        y_all = np.concatenate([y_old, y_new], axis=0)
+    save_feature_store(X_all, y_all, path)
+    return X_all, y_all
+
+def per_class_counts(y, n_classes=10):
+    counts = np.zeros(n_classes, dtype=int)
+    if y is not None:
+        for c in range(n_classes):
+            counts[c] = int(np.sum(y == c))
+    return counts
+
+def pick_balanced_subset(X, y, n_per_class, seed=42):
+    rng = np.random.default_rng(seed)
+    xs, ys = [], []
+    for c in range(10):
+        idx = np.where(y == c)[0]
+        take = rng.choice(idx, size=n_per_class, replace=False)
+        xs.append(X[take])
+        ys.append(y[take])
+    return np.vstack(xs), np.concatenate(ys)
+#
       
 def hadamard_like_masks(n_masks, width=7, seed=0):
     rng = np.random.default_rng(seed)
@@ -47,12 +87,6 @@ def hadamard_like_masks(n_masks, width=7, seed=0):
     return np.array(M)
 
 def downsample_to_7xM(img2d: np.ndarray, M: int) -> np.ndarray:
-    """
-    Reduce 28x28 image to a 7xM grid using max-pooling:
-      - Columns: 28 -> 7 via 4-wide non-overlapping max
-      - Rows:    28 -> M via max over nearly-equal row bands (np.array_split)
-    Returns array shape (M, 7) where each row is one 7-value chunk.
-    """
     assert img2d.shape == (28, 28)
     # columns: 28 -> 7 (keep horizontal detail for each heater)
     col_reduced = img2d.reshape(28, 7, 4).mean(axis=2)  # (28, 7)
@@ -85,6 +119,21 @@ def load_mnist_data(n_samples_per_class=50):
     
     print(f"Using resized subset: {len(X_subset)} samples ({n_samples_per_class} per digit)")
     return X_subset, y_subset
+
+def load_mnist_pool(max_per_class=400):
+    """Return a larger candidate pool (downsampled to 7xROW_BANDS) to fill 'missing' needs."""
+    mnist = fetch_openml('mnist_784', version=1, parser='auto')
+    X, y = mnist.data.values / 255.0, mnist.target.values.astype(int)
+    X_resized = []
+    for img in X:
+        img_2d = img.reshape(28, 28)
+        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)
+        X_resized.append(grid7xM.flatten())
+    X_resized = np.array(X_resized)
+
+    # Create a balanced pool up to max_per_class
+    X_pool, y_pool = create_balanced_subset(X_resized, y, max_per_class)
+    return X_pool, y_pool
     
         
 def create_balanced_subset(X, y, n_per_class):
@@ -199,66 +248,73 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
             for m in mask_matrix:
                 v = v_bias + base * m
                 v = np.clip(v, vmin, vmax)
-                print("v", np.round(v, 2))
+                #print("v", np.round(v, 2))
                 send((heaters, v))                   
                 pd = read_many(avg=readavg)
                 features.append(pd)
 
         return np.asarray(features, float).ravel()
 
-    def process_dataset(self, X_images, y_labels, phase_name="PROCESSING"):
+    def process_dataset(self, X_images, y_labels, phase_name="PROCESSING",
+                    existing_counts=None, target_per_class=None):
 
-        print(f"[{phase_name}] Processing {len(X_images)} images...")
-        X_features = []
-        processed_labels = []
+        print(f"[{phase_name}] Candidate images: {len(X_images)}")
+        need = int(target_per_class) if target_per_class is not None else None
+        have = per_class_counts(y=None) if existing_counts is None else existing_counts.copy()
+
+        # If nothing missing, bail out immediately
+        if need is not None and np.all(have >= need):
+            print(f"[{phase_name}] Already have >={need} per class. No measurement needed.")
+            return np.empty((0, )), np.empty((0, ), dtype=int)
+
+        X_new, y_new = [], []
+        missing = None if need is None else (np.maximum(need - have, 0))
 
         for i, (image, label) in enumerate(zip(X_images, y_labels)):
-            if (i + 1) % 10 == 0:
+            if (i + 1) % 25 == 0:
                 print(f"[{phase_name}] Processed {i+1}/{len(X_images)} images")
+            if need is not None:
+                # If this class is already satisfied, skip without touching hardware
+                if missing[label] <= 0:
+                    continue
+                # If ALL satisfied, stop
+                if np.all(missing <= 0):
+                    break
 
+            # Drive hardware for this one
             try:
                 features = self.process_spatial_pattern(image)
-                # Check for NaNs and skip if found
                 if not np.any(np.isnan(features)):
-                    X_features.append(features)
-                    processed_labels.append(label)
+                    X_new.append(features)
+                    y_new.append(label)
+                    if need is not None:
+                        have[label] += 1
+                        missing[label] -= 1
                 else:
-                    print(f"[WARNING] Skipping image {i} due to NaN values in features.")
-
+                    print(f"[WARNING] NaN features at candidate {i}; skipped.")
             except Exception as e:
-                print(f"[ERROR] Failed to process image {i}: {e}")
-                continue
+                print(f"[ERROR] Failed at candidate {i}: {e}")
 
-        X_features = np.array(X_features)
-        processed_labels = np.array(processed_labels)
+        if len(X_new) == 0:
+            print(f"[{phase_name}] No new samples measured.")
+            return np.empty((0, )), np.empty((0, ), dtype=int)
 
-        print(f"[{phase_name}] Completed: {X_features.shape[0]} samples, {X_features.shape[1]} features")
-
-        return X_features, processed_labels
-
+        X_new = np.asarray(X_new, float)
+        y_new = np.asarray(y_new, int)
+        print(f"[{phase_name}] Measured new: {len(y_new)} (per-class now: {have})")
+        return X_new, y_new
 # ==========================
 # CLASSIFICATION TRAINING
 # ==========================
 
+
 def train_mnist_classifier(X_features, y_labels, *, seed=42):
     """
-    Trains TWO one-layer heads on fixed features (ELM style):
+    Trains THREE one-layer heads on fixed features (ELM style):
       1) LinearRegression (multi-output on one-hot; predict via argmax)
       2) RidgeClassifierCV (direct linear classifier on labels)
-
-    Returns:
-      models = {
-        "linreg": linear_regression_model,
-        "ridge_clf": ridge_classifier_model,
-      },
-      results = {
-        "linreg": {...},
-        "ridge_clf": {...},
-        "scaler": StandardScaler fitted on train,
-      },
-      (X_test, y_test)
+      3) LogisticRegression (multinomial linear classifier)
     """
-
     TEST_FRACTION = 0.2
 
     print("\n[ELM] Training one-layer heads on fixed features...")
@@ -313,7 +369,6 @@ def train_mnist_classifier(X_features, y_labels, *, seed=42):
         "n_classes": n_classes,
     }
 
-
     # ---- B) RidgeClassifierCV (direct linear classifier with L2) ----
     ridge_clf = RidgeClassifierCV(alphas=np.logspace(-3, 3, 13))
     ridge_clf.fit(X_train_s, y_train)
@@ -340,35 +395,60 @@ def train_mnist_classifier(X_features, y_labels, *, seed=42):
         "n_classes": n_classes,
     }
 
+    # ---- C) Logistic Regression (multinomial) ----
+    logreg = LogisticRegression(max_iter=20000, solver="lbfgs", C=0.3)
+    logreg.fit(X_train_s, y_train)
+
+    y_pred_tr3 = logreg.predict(X_train_s)
+    y_pred_te3 = logreg.predict(X_test_s)
+    acc_tr3 = accuracy_score(y_train, y_pred_tr3)
+    acc_te3 = accuracy_score(y_test, y_pred_te3)
+
+    print(f"\n[LOGREG] Train acc: {acc_tr3:.3f} | Test acc: {acc_te3:.3f}")
+    print("[LOGREG] Classification report (test):")
+    print(classification_report(y_test, y_pred_te3, zero_division=0))
+    print("[LOGREG] Confusion matrix (test):")
+    print(confusion_matrix(y_test, y_pred_te3))
+
+    models["logreg"] = logreg
+    results["logreg"] = {
+        "train_accuracy": acc_tr3,
+        "test_accuracy": acc_te3,
+        "y_pred": y_pred_te3,
+        "n_features": X_features.shape[1],
+        "n_classes": n_classes,
+    }
+
     # store scaler for later inference
     results["scaler"] = scaler
 
     return models, results, (X_test, y_test)
-
-
 # ==========================
 # VISUALIZATION AND ANALYSIS
 # ==========================
 
 def visualize_results(X_images, y_labels, classifier, X_test, y_test, results, *,
-                      save_dir=os.path.join("MNIST", "figures"),
                       meta=None, total_seconds=None, run_tag=None):
-
-    import os
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from sklearn.metrics import confusion_matrix, accuracy_score
-
-    # --- choose which model's predictions to plot ---
-    # Prefer ridge_clf if available; otherwise first entry that has y_pred
-    if "ridge_clf" in results and isinstance(results["ridge_clf"], dict) and "y_pred" in results["ridge_clf"]:
-        key = "ridge_clf"
-    else:
-        key = next(k for k, v in results.items() if isinstance(v, dict) and "y_pred" in v)
+    
+    # Prefer a specific model if present; fall back to best available
+    preferred_order = ["logreg", "ridge_clf", "linreg"]
+    key = None
+    for name in preferred_order:
+        if isinstance(results.get(name), dict) and "y_pred" in results[name]:
+            key = name
+            break
+    if key is None:
+        # fallback: pick the entry with y_pred and highest test_accuracy
+        candidates = [(k, v) for k, v in results.items()
+                      if isinstance(v, dict) and "y_pred" in v]
+        if not candidates:
+            raise ValueError("No results with 'y_pred' found for visualization.")
+        key = max(candidates, key=lambda kv: kv[1].get("test_accuracy", float("-inf")))[0]
 
     y_pred = np.asarray(results[key]["y_pred"])
 
     # ensure output folder exists
+    save_dir=os.path.join("MNIST", "figures")
     os.makedirs(save_dir, exist_ok=True)
 
     plt.figure(figsize=(12, 4))
@@ -458,28 +538,74 @@ def main_mnist():
     reservoir = None
 
     try:
-        # Load data
-        X_images, y_labels = load_mnist_data(N_SAMPLES_PER_DIGIT)
-        print(f"Dataset loaded: {len(X_images)} samples, {len(np.unique(y_labels))} classes")
+        # ---------- FAST PATH: skip hardware if cache already satisfies target ----------
+        X_cached, y_cached = load_feature_store(FEATURE_STORE)
+        target = N_SAMPLES_PER_DIGIT
+        if X_cached is not None:
+            counts = per_class_counts(y_cached, n_classes=10)
+            if np.all(counts >= target):
+                print(f"[FastPath] Cache already has >= {target} per class. Skipping measurement.")
+                # Train using exactly 'target' per class
+                X_train_pool, y_train_pool = pick_balanced_subset(X_cached, y_cached, target, seed=42)
+                models, results, test_data = train_mnist_classifier(X_train_pool, y_train_pool)
+                scaler = results.pop("scaler", None)
+
+                # (optional) visualize & save model exactly as you already do
+                meta = {
+                    "K_VIRTUAL": K_VIRTUAL, "ROW_BANDS": ROW_BANDS,
+                    "N_SAMPLES_PER_DIGIT": N_SAMPLES_PER_DIGIT,
+                    "SPATIAL_GAIN": SPATIAL_GAIN, "READ_AVG": READ_AVG,
+                }
+                total_time = time.perf_counter() - t0
+                visualize_results(None, None, models, *test_data, results,
+                                  meta=meta,
+                                  total_seconds=total_time, run_tag="mnist_photonic_cached")
+                # Save artifacts (reusing your existing save block)
+                os.makedirs("models", exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_path = os.path.join("MNIST","models", f"mnist_photonic_classifier_{timestamp}.pkl")
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                with open(save_path, 'wb') as f:
+                    pickle.dump({'models': models, 'results': results,
+                                 'config': {'INPUT_HEATERS': INPUT_HEATERS,
+                                            'SPATIAL_GAIN': SPATIAL_GAIN,
+                                            'K_VIRTUAL': K_VIRTUAL}}, f)
+                print(f"Classifier saved to '{save_path}'")
+                return
+        # ---------- END FAST PATH ----------
+        else:
+            counts = np.zeros(10, dtype=int)
+        # Get a big candidate pool; we will only measure what’s missing
+        X_pool, y_pool = load_mnist_pool(max_per_class=max(target, 200))
 
         reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
 
-        # Process dataset through reservoir
-        X_features, y_processed = reservoir.process_dataset(X_images, y_labels, "TRAINING")
+        # Measure ONLY the missing samples per class; stop when each class hits 'target'
+        X_new, y_new = reservoir.process_dataset(
+            X_pool, y_pool, "TRAINING",
+            existing_counts=counts,
+            target_per_class=target
+        )
 
-        # Free hardware resources as soon as possible
         if reservoir is not None:
-            reservoir.close()
-            reservoir = None
-        
-        if len(X_features) == 0:
-            print("ERROR: No samples processed successfully!")
+            reservoir.close(); reservoir = None
+
+        # If nothing new was needed, fine; otherwise append
+        if X_new.size > 0:
+            X_all, y_all = append_feature_store(X_new, y_new, FEATURE_STORE)
+        else:
+            X_all, y_all = (X_cached, y_cached)
+
+        # Now we definitely have at least what we had before,
+        # and likely exactly 'target' per class. Train on a balanced slice:
+        counts_after = per_class_counts(y_all, 10)
+        if np.any(counts_after < target):
+            print(f"[WARN] Still short for some classes: {counts_after} (need {target}).")
+            # You can bail out or train on what you have; here we bail for clarity:
             return
-        
-        # Train classifier
-        models, results, test_data = train_mnist_classifier(X_features, y_processed)
-        
-        # add this right after the line above
+
+        X_for_train, y_for_train = pick_balanced_subset(X_all, y_all, target, seed=42)
+        models, results, test_data = train_mnist_classifier(X_for_train, y_for_train)
         scaler = results.pop("scaler", None)
 
         # Analysis
@@ -497,9 +623,36 @@ def main_mnist():
             "READ_AVG": READ_AVG,
         }
 
+        if 'X_all' in locals() and X_all is not None and len(X_all) > 0:
+            X_vis, y_vis = X_all, y_all
+        elif 'X_cached' in locals() and X_cached is not None and len(X_cached) > 0:
+            X_vis, y_vis = X_cached, y_cached
+        elif 'X_pool' in locals() and X_pool is not None and len(X_pool) > 0:
+            X_vis, y_vis = X_pool, y_pool
+        else:
+            # Fallback if nothing available
+            X_vis = np.zeros((1, 7 * ROW_BANDS))
+            y_vis = np.zeros((1,))
+            
+                    # ---------------------------
+        # Print summary safely (works for both cached and new runs)
+        # ---------------------------
+        if 'X_all' in locals() and X_all is not None:
+            n_samples = len(X_all)
+            n_features = X_all.shape[1]
+        elif 'X_cached' in locals() and X_cached is not None:
+            n_samples = len(X_cached)
+            n_features = X_cached.shape[1]
+        elif 'X_features' in locals() and X_for_train is not None:
+            n_samples = len(X_for_train)
+            n_features = X_for_train.shape[1]
+        else:
+            n_samples, n_features = 0, 0
+
+        print(f"Dataset size: {n_samples} samples")
+        print(f"Feature dimensionality: {n_features} -> expanded features")
         visualize_results(
-            X_images, y_processed, models, *test_data, results,
-            save_dir="figures",
+            X_vis, y_vis, models, *test_data, results,
             meta=meta,
             total_seconds=total_time,
             run_tag="mnist_photonic"
@@ -515,8 +668,8 @@ def main_mnist():
         print("FINAL RESULTS SUMMARY")
         print(f"{'='*60}")
         print(f"Best classification accuracy: {best_accuracy:.1%}")
-        print(f"Dataset size: {len(X_images)} samples")
-        print(f"Feature dimensionality: {X_features.shape[1]} -> expanded features")
+        print(f"Dataset size: {(n_samples)} samples")
+        print(f"Feature dimensionality: {n_features} -> expanded features")
         
         # Save classifier for future use
         os.makedirs("models", exist_ok=True)

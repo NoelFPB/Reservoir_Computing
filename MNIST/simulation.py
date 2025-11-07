@@ -2,18 +2,18 @@ import numpy as np
 from sklearn.datasets import fetch_openml
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import RidgeClassifierCV, LogisticRegression
+from sklearn.linear_model import RidgeClassifierCV, LogisticRegression, LinearRegression
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # -----------------------------
 # Config
 # -----------------------------
-ROW_BANDS   = 4      # 28x28 -> 7 x ROW_BANDS
-K_VIRTUAL   = 4       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
+ROW_BANDS   = 6      # 28x28 -> 7 x ROW_BANDS
+K_VIRTUAL   = 1       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
 MASK_SEED   = 42
 TEST_SIZE   = 0.2
 SEED        = 42
-N_PER_CLASS = 80     # for speed
+N_PER_CLASS = 100     # for speed
 
 # -----------------------------
 # Helpers
@@ -94,10 +94,10 @@ def main():
     Xb, yb = make_balanced_subset(X, y, n_per_class=N_PER_CLASS, seed=SEED)
     imgs = Xb.reshape(-1, 28, 28)
 
-    # Build direct-with-masks features (K=1 → plain direct)
+    # Build direct-with-masks features
     X_masked = build_direct_with_masks(imgs, row_bands=ROW_BANDS,
                                        k_virtual=K_VIRTUAL, mask_seed=MASK_SEED)
-    print(f"Feature shape: {X_masked.shape}  (dim = 7 * ROW_BANDS * K_VIRTUAL = {7*ROW_BANDS*K_VIRTUAL})")
+    print(f"Feature shape: {X_masked.shape}  (dim = {7*ROW_BANDS*K_VIRTUAL})")
 
     # Train/test split
     X_train, X_test, y_train, y_test = train_test_split(
@@ -107,45 +107,72 @@ def main():
     # Scale
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
+    X_test  = scaler.transform(X_test)
 
+    results = {}
+
+    # -------------------------
     # Ridge Classifier (linear)
+    # -------------------------
     ridge = RidgeClassifierCV(alphas=np.logspace(-3, 3, 13))
     ridge.fit(X_train, y_train)
-
-    # ➜ ADD these two lines to get TRAIN accuracy for Ridge
     y_pred_ridge_tr = ridge.predict(X_train)
+    y_pred_ridge_te = ridge.predict(X_test)
     acc_ridge_tr = accuracy_score(y_train, y_pred_ridge_tr)
+    acc_ridge_te = accuracy_score(y_test,  y_pred_ridge_te)
     print(f"Ridge Classifier TRAIN accuracy: {acc_ridge_tr:.3f}")
-
-    y_pred_ridge = ridge.predict(X_test)
-    acc_ridge = accuracy_score(y_test, y_pred_ridge)
-    print(f"Ridge Classifier TEST  accuracy: {acc_ridge:.3f}")
-    # Reports (Ridge)
+    print(f"Ridge Classifier TEST  accuracy: {acc_ridge_te:.3f}")
     print("\n=== Classification Report (Ridge) ===")
-    print(classification_report(y_test, y_pred_ridge, zero_division=0))
+    print(classification_report(y_test, y_pred_ridge_te, zero_division=0))
     print("\n=== Confusion Matrix (Ridge) ===")
-    print(confusion_matrix(y_test, y_pred_ridge))
+    print(confusion_matrix(y_test, y_pred_ridge_te))
+    results["ridge"] = {"train_acc": acc_ridge_tr, "test_acc": acc_ridge_te}
 
-    # Logistic Regression (linear)
-    logreg = LogisticRegression(max_iter=20000, solver="lbfgs")
-    logreg.fit(X_train, y_train)
+    # -------------------------------------------
+    # OLS on one-hot (true LinearRegression head)
+    # -------------------------------------------
+    classes = np.unique(y_train)
+    Y_train = np.eye(classes.size)[y_train]
+    ols = LinearRegression()
+    ols.fit(X_train, Y_train)
+    scores_tr = X_train @ ols.coef_.T + ols.intercept_
+    scores_te = X_test  @ ols.coef_.T + ols.intercept_
+    y_pred_ols_tr = np.argmax(scores_tr, axis=1)
+    y_pred_ols_te = np.argmax(scores_te, axis=1)
+    acc_ols_tr = accuracy_score(y_train, y_pred_ols_tr)
+    acc_ols_te = accuracy_score(y_test,  y_pred_ols_te)
+    print(f"\nOLS (LinearRegression) TRAIN accuracy: {acc_ols_tr:.3f}")
+    print(f"OLS (LinearRegression) TEST  accuracy: {acc_ols_te:.3f}")
+    print("\n=== Classification Report (OLS / LinearRegression) ===")
+    print(classification_report(y_test, y_pred_ols_te, zero_division=0))
+    print("\n=== Confusion Matrix (OLS / LinearRegression) ===")
+    print(confusion_matrix(y_test, y_pred_ols_te))
+    results["ols"] = {"train_acc": acc_ols_tr, "test_acc": acc_ols_te}
 
-    # ➜ ADD these two lines to get TRAIN accuracy for LogReg
-    y_pred_logreg_tr = logreg.predict(X_train)
-    acc_logreg_tr = accuracy_score(y_train, y_pred_logreg_tr)
-    print(f"Logistic Regression TRAIN accuracy: {acc_logreg_tr:.3f}")
+    # ----------------------
+    # Logistic Regression
+    # ----------------------
+    # logreg = LogisticRegression(max_iter=20000, solver="lbfgs")
+    # logreg.fit(X_train, y_train)
+    # y_pred_logreg_tr = logreg.predict(X_train)
+    # y_pred_logreg_te = logreg.predict(X_test)
+    # acc_logreg_tr = accuracy_score(y_train, y_pred_logreg_tr)
+    # acc_logreg_te = accuracy_score(y_test,  y_pred_logreg_te)
+    # print(f"\nLogistic Regression TRAIN accuracy: {acc_logreg_tr:.3f}")
+    # print(f"Logistic Regression TEST  accuracy: {acc_logreg_te:.3f}")
+    # print("\n=== Classification Report (Logistic Regression) ===")
+    # print(classification_report(y_test, y_pred_logreg_te, zero_division=0))
+    # print("\n=== Confusion Matrix (Logistic Regression) ===")
+    # print(confusion_matrix(y_test, y_pred_logreg_te))
+    # results["logreg"] = {"train_acc": acc_logreg_tr, "test_acc": acc_logreg_te}
 
-    y_pred_logreg = logreg.predict(X_test)
-    acc_logreg = accuracy_score(y_test, y_pred_logreg)
-    print(f"Logistic Regression TEST  accuracy: {acc_logreg:.3f}")
+    # Summary
+    best = max(results.items(), key=lambda kv: kv[1]["test_acc"])
+    print("\n" + "-"*60)
+    print(f"Best head: {best[0]}  |  test acc = {best[1]['test_acc']:.3f}")
+    print("-"*60)
 
-
-    # Reports (Linear)
-    print("\n=== Classification Report (Linear Regression) ===")
-    print(classification_report(y_test, y_pred_logreg, zero_division=0))
-    print("\n=== Confusion Matrix (Linear Regression) ===")
-    print(confusion_matrix(y_test, y_pred_logreg))
+    return results
 
 if __name__ == "__main__":
     main()
