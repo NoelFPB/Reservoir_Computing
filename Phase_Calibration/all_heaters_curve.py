@@ -502,8 +502,8 @@ def main():
     try:
         batch_calibrate(
             heaters=list(range(28)),  # 0..27
-            vmin=0.10, vmax=4.90,
-            points=250,               # 121–201 recommended
+            vmin=0.0, vmax=5.0,
+            points=100,               # 121–201 recommended
             settle=0.20,
             reads=3,
             scope=scope,

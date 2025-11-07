@@ -1,6 +1,6 @@
 heater,best_ch,phi_span,n_points,reads,json
-0,5,5.446771040038811,250,3,calibration\heater_00.json
-1,5,11.281293847694997,250,3,calibration\heater_01.json
+0,5,24.079585529765097,100,3,calibration\heater_00.json
+1,5,12.107108915569711,100,3,calibration\heater_01.json
 2,4,5.795135238481123,250,3,calibration\heater_02.json
 3,4,8.626252352672793,250,3,calibration\heater_03.json
 4,5,5.188674702343349,250,3,calibration\heater_04.json

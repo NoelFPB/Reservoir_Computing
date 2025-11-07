@@ -33,7 +33,7 @@ READ_AVG = 1             # Fewer averages needed
 SPATIAL_GAIN = 0.6     # How strongly pixels drive heaters Now should be less than 0.64
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 500 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 510 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
 
 #
@@ -172,16 +172,16 @@ class PhotonicReservoir:
 
         # Fixed random mesh bias
 
-        rng = np.random.default_rng(42)
-        self.mesh_bias = {
-            h: float(rng.uniform(V_MIN, V_MAX))
-            for h in self.internal_heaters
-        }
-        # Zero mesh
+        # rng = np.random.default_rng(42)
         # self.mesh_bias = {
-        #     h: 0.1
+        #     h: float(rng.uniform(V_MIN, V_MAX))
         #     for h in self.internal_heaters
         # }
+        # Zero mesh
+        self.mesh_bias = {
+            h: 5.0
+            for h in self.internal_heaters
+        }
 
         self.input_bias = {h: V_BIAS_INPUT for h in range(28, 35)}
 
