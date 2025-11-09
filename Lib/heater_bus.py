@@ -14,20 +14,6 @@ class HeaterBus:
         self.ser.reset_input_buffer()
         self.ser.reset_output_buffer()
 
-    # def send(self, config):
-    #       # Create a new dictionary with standard Python floats for printing
-    #     # printable_config = {
-    #     #     heater: float(value) for heater, value in config.items()
-    #     # }
-    #     # print(printable_config)
-        
-    #     voltage_message = "".join(f"{heater},{value};" for heater, value in config.items()) + '\n'
-    #     self.ser.write(voltage_message.encode())
-    #     self.ser.flush()
-    #     time.sleep(0.01)
-    #     self.ser.reset_input_buffer()
-    #     self.ser.reset_output_buffer()
-
     def send(self, config):
         # Accept dict OR (heaters, values) tuple
         if isinstance(config, dict):
@@ -41,11 +27,6 @@ class HeaterBus:
         voltage_message = "".join(f"{heater},{float(value):.3f};" for heater, value in items) + '\n'
         self.ser.write(voltage_message.encode())
         self.ser.flush()
-        # NOTE: the sleeps and buffer resets here may be slowing you down
-        time.sleep(0.1)
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-
 
     def close(self):
         try: 

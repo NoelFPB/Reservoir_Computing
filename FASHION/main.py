@@ -1,4 +1,4 @@
-﻿import os
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -9,12 +9,14 @@ from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_sp
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from Lib.scope import RigolDualScopes
-from Lib.heater_bus import HeaterBus
+from Lib.HeaterBusNEW import HeaterBus
 import pickle
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression, RidgeClassifierCV, LogisticRegression
 
-FEATURE_STORE = os.path.join("MNIST", "feature_store_gain0.6_row4_mask1.npz")
+FEATURE_STORE = os.path.join("FASHION", "feature_store_gain0.6_row4_mask4.npz")
+FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
+                   'Sandal','Shirt','Sneaker','Bag','Ankle boot']
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
@@ -26,7 +28,7 @@ V_BIAS_INTERNAL = 0.1
 V_BIAS_INPUT = 3.4
 
 ROW_BANDS = 4 # How many 7-wide row bands to use 
-K_VIRTUAL = 1          # Still use virtual nodes for feature diversity
+K_VIRTUAL = 4          # Still use virtual nodes for feature diversity
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
@@ -95,20 +97,29 @@ def downsample_to_7xM(img2d: np.ndarray, M: int) -> np.ndarray:
     out = np.stack([b.mean(axis=0) for b in bands], axis=0)  # (M, 7)
     return out
 
-def load_mnist_pool(max_per_class=400):
-    """Return a larger candidate pool (downsampled to 7xROW_BANDS) to fill 'missing' needs."""
-    mnist = fetch_openml('mnist_784', version=1, parser='auto')
-    X, y = mnist.data.values / 255.0, mnist.target.values.astype(int)
+def load_fashion_mnist_pool(max_per_class=400):
+    """
+    Return a larger candidate pool (downsampled to 7xROW_BANDS)
+    to fill 'missing' needs, but using Fashion-MNIST instead of MNIST.
+    """
+    print("[Data] Loading Fashion-MNIST pool...")
+    fm = fetch_openml('Fashion-MNIST', version=1, as_frame=False)
+    X, y = fm.data / 255.0, fm.target.astype(int)
+
     X_resized = []
     for img in X:
         img_2d = img.reshape(28, 28)
-        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)
+        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)   # (ROW_BANDS × 7)
         X_resized.append(grid7xM.flatten())
-    X_resized = np.array(X_resized)
 
-    # Create a balanced pool up to max_per_class
+    X_resized = np.asarray(X_resized)
+
+    # Balanced candidate pool
     X_pool, y_pool = create_balanced_subset(X_resized, y, max_per_class)
+    print(f"[Data] Fashion-MNIST pool ready: {len(X_pool)} samples "
+          f"({max_per_class} per class).")
     return X_pool, y_pool
+
     
         
 def create_balanced_subset(X, y, n_per_class):
@@ -418,35 +429,23 @@ def visualize_results(X_images, y_labels, classifier, X_test, y_test, results, *
     y_pred = np.asarray(results[key]["y_pred"])
 
     # ensure output folder exists
-    save_dir=os.path.join("MNIST", "figures")
+    save_dir=os.path.join("FASHION", "figures")
     os.makedirs(save_dir, exist_ok=True)
 
     plt.figure(figsize=(12, 4))
 
     # --- Confusion Matrix ---
+    labels = FASHION_CLASSES  # for Fashion-MNIST; keep range(10) for digits
+
     plt.subplot(1, 2, 1)
     cm = confusion_matrix(y_test, y_pred)
-    plt.imshow(cm, interpolation='nearest')  # default colormap
+    plt.imshow(cm, interpolation='nearest')
     plt.title(f'Confusion Matrix ({key})')
     plt.colorbar()
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
-
-    # --- Per-digit accuracy ---
-    plt.subplot(1, 2, 2)
-    digit_accuracies = []
-    for digit in range(10):
-        mask = (y_test == digit)
-        if np.any(mask):
-            acc = accuracy_score(y_test[mask], y_pred[mask])
-        else:
-            acc = 0.0
-        digit_accuracies.append(acc)
-    plt.bar(range(10), digit_accuracies)
-    plt.xlabel('Digit')
-    plt.ylabel('Accuracy')
-    plt.title(f'Per-Digit Accuracy ({key})')
-    plt.xticks(range(10))
+    plt.xticks(ticks=range(10), labels=labels, rotation=45, ha='right', fontsize=8)
+    plt.yticks(ticks=range(10), labels=labels, fontsize=8)
 
     # --- Title metadata (robust best model selection) ---
     meta = meta or {}
@@ -546,7 +545,7 @@ def main_mnist():
         else:
             counts = np.zeros(10, dtype=int)
         # Get a big candidate pool; we will only measure what’s missing
-        X_pool, y_pool = load_mnist_pool(max_per_class=max(target, 200))
+        X_pool, y_pool = load_fashion_mnist_pool(max_per_class=max(target, 200))
 
         reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
 

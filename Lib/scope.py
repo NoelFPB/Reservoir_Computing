@@ -54,7 +54,7 @@ class RigolScope:
                 v = self.read_channel(ch)
                 if np.isfinite(v):
                     samples.append(v)
-                #time.sleep(0.002)
+   
             
             if samples:
                 vals.append(float(np.mean(samples)))
