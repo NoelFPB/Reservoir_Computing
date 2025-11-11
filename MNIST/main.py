@@ -8,13 +8,14 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
 from Lib.scope import RigolDualScopes
-from Lib.heater_bus import HeaterBus
+from Lib.DualBoard import DualAD5380Controller
 import pickle
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression, RidgeClassifierCV, LogisticRegression
 
-FEATURE_STORE = os.path.join("MNIST", "feature_store_gain0.6_row4_mask1.npz")
+FEATURE_STORE = os.path.join("MNIST", "feature_store_gain0.6_row4_mask4.npz")
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
@@ -26,7 +27,7 @@ V_BIAS_INTERNAL = 0.1
 V_BIAS_INPUT = 3.4
 
 ROW_BANDS = 4 # How many 7-wide row bands to use 
-K_VIRTUAL = 1          # Still use virtual nodes for feature diversity
+K_VIRTUAL = 4          # Still use virtual nodes for feature diversity
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
@@ -143,7 +144,7 @@ class PhotonicReservoir:
         self.input_heaters = list(input_heaters)
         self.internal_heaters = [h for h in all_heaters if h not in self.input_heaters]
         self.scope = RigolDualScopes(SCOPE1_CHANNELS, SCOPE2_CHANNELS, serial_scope1='HDO1B244000779')
-        self.bus = HeaterBus()
+        self.bus = DualAD5380Controller()
 
         # Fixed random mesh bias
 
@@ -158,14 +159,18 @@ class PhotonicReservoir:
         self.mask = hadamard_like_masks(K_VIRTUAL - 1, 7, seed=42)
 
         # Apply initial baseline
-        self.bus.send({**self.mesh_bias, **self.input_bias})
+        baseline = ({**self.mesh_bias, **self.input_bias})
+
+        chs = sorted(baseline.keys())
+        vs = [baseline[h] for h in chs]
+        self.bus.set(chs, vs)
+
         print(self.input_bias)
         print(self.mesh_bias)
         #time.sleep(0.5)
 
     def close(self):
         self.scope.close()
-        self.bus.close()
 
 # ==========================
 # PHOTONIC RESERVOIR
@@ -206,7 +211,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
                 np.asarray(self.mask[:need], dtype=float)   # +/-1 masks
             ])
 
-        send = self.bus.send
+        send = self.bus.set
         read_many = self.scope.read_many
 
         features = []
@@ -219,7 +224,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
                 v = v_bias + base * m
                 v = np.clip(v, vmin, vmax)
                 #print("v", np.round(v, 2))
-                send((heaters, v))                   
+                send(heaters, v.tolist())                   
                 pd = read_many(avg=readavg)
                 features.append(pd)
 
@@ -361,30 +366,6 @@ def train_mnist_classifier(X_features, y_labels, *, seed=42):
         "test_accuracy": acc_te2,
         "y_pred": y_pred_te2,
         "alpha": ridge_clf.alpha_,
-        "n_features": X_features.shape[1],
-        "n_classes": n_classes,
-    }
-
-    # ---- C) Logistic Regression (multinomial) ----
-    logreg = LogisticRegression(max_iter=20000, solver="lbfgs", C=0.3)
-    logreg.fit(X_train_s, y_train)
-
-    y_pred_tr3 = logreg.predict(X_train_s)
-    y_pred_te3 = logreg.predict(X_test_s)
-    acc_tr3 = accuracy_score(y_train, y_pred_tr3)
-    acc_te3 = accuracy_score(y_test, y_pred_te3)
-
-    print(f"\n[LOGREG] Train acc: {acc_tr3:.3f} | Test acc: {acc_te3:.3f}")
-    print("[LOGREG] Classification report (test):")
-    print(classification_report(y_test, y_pred_te3, zero_division=0))
-    print("[LOGREG] Confusion matrix (test):")
-    print(confusion_matrix(y_test, y_pred_te3))
-
-    models["logreg"] = logreg
-    results["logreg"] = {
-        "train_accuracy": acc_tr3,
-        "test_accuracy": acc_te3,
-        "y_pred": y_pred_te3,
         "n_features": X_features.shape[1],
         "n_classes": n_classes,
     }

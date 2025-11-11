@@ -3,6 +3,7 @@ import time, serial
 SERIAL_PORT = 'COM3'
 BAUD_RATE = 115200
 
+# for arduino
 
 class HeaterBus:
     """Serial sender for 'heater,value;...\\n' strings."""

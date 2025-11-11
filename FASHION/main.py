@@ -9,12 +9,13 @@ from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_sp
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from Lib.scope import RigolDualScopes
-from Lib.HeaterBusNEW import HeaterBus
+from Lib.DualBoard import DualAD5380Controller
 import pickle
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression, RidgeClassifierCV, LogisticRegression
 
-FEATURE_STORE = os.path.join("FASHION", "feature_store_gain0.6_row4_mask4.npz")
+FEATURE_STORE = os.path.join("FASHION", "test.npz")
+
 FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
                    'Sandal','Shirt','Sneaker','Bag','Ankle boot']
 
@@ -35,7 +36,7 @@ READ_AVG = 1             # Fewer averages needed
 SPATIAL_GAIN = 0.6     # How strongly pixels drive heaters Now should be less than 0.64
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)z
 TEST_FRACTION = 0.2      # 20% for testing
 
 #
@@ -76,7 +77,6 @@ def pick_balanced_subset(X, y, n_per_class, seed=42):
         xs.append(X[take])
         ys.append(y[take])
     return np.vstack(xs), np.concatenate(ys)
-#
       
 def hadamard_like_masks(n_masks, width=7, seed=0):
     rng = np.random.default_rng(seed)
@@ -154,7 +154,7 @@ class PhotonicReservoir:
         self.input_heaters = list(input_heaters)
         self.internal_heaters = [h for h in all_heaters if h not in self.input_heaters]
         self.scope = RigolDualScopes(SCOPE1_CHANNELS, SCOPE2_CHANNELS, serial_scope1='HDO1B244000779')
-        self.bus = HeaterBus()
+        self.bus = DualAD5380Controller()
 
         # Fixed random mesh bias
 
@@ -169,14 +169,16 @@ class PhotonicReservoir:
         self.mask = hadamard_like_masks(K_VIRTUAL - 1, 7, seed=42)
 
         # Apply initial baseline
-        self.bus.send({**self.mesh_bias, **self.input_bias})
+        baseline = ({**self.mesh_bias, **self.input_bias})
+
+        chs = sorted(baseline.keys())
+        vs = [baseline[h] for h in chs]
+        self.bus.set(chs, vs)
         print(self.input_bias)
         print(self.mesh_bias)
-        #time.sleep(0.5)
 
     def close(self):
         self.scope.close()
-        self.bus.close()
 
 # ==========================
 # PHOTONIC RESERVOIR
@@ -216,12 +218,10 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
                 np.ones((1, chunk_size), dtype=float),             # baseline mask
                 np.asarray(self.mask[:need], dtype=float)   # +/-1 masks
             ])
-
-        send = self.bus.send
+        send = self.bus.set
         read_many = self.scope.read_many
 
         features = []
-
         for i in range(num_chunks):
             sl = slice(i*chunk_size, (i+1)*chunk_size)
             base = gain * half_swing * x_centered[sl]            # shape (7,)
@@ -229,8 +229,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
             for m in mask_matrix:
                 v = v_bias + base * m
                 v = np.clip(v, vmin, vmax)
-                #print("v", np.round(v, 2))
-                send((heaters, v))                   
+                send(heaters, v.tolist())            
                 pd = read_many(avg=readavg)
                 features.append(pd)
 
@@ -275,6 +274,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
                     print(f"[WARNING] NaN features at candidate {i}; skipped.")
             except Exception as e:
                 print(f"[ERROR] Failed at candidate {i}: {e}")
+             
 
         if len(X_new) == 0:
             print(f"[{phase_name}] No new samples measured.")
@@ -505,7 +505,6 @@ def main_mnist():
     print("="*60)
     t0 = time.perf_counter()
     reservoir = None
-
     try:
         # ---------- FAST PATH: skip hardware if cache already satisfies target ----------
         X_cached, y_cached = load_feature_store(FEATURE_STORE)

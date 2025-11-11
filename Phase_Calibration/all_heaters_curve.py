@@ -14,7 +14,7 @@ except Exception:
 
 # Your drivers
 from Lib.scope import RigolDualScopes
-from Lib.heater_bus import HeaterBus
+from Lib.DualBoard import DualAD5380Controller
 
 # ---------------------------
 # Helpers
@@ -187,7 +187,7 @@ def sweep_heater(heater_id, vmin, vmax, n_points, settle_s, reads_avg, scope, bu
     I_rows = []
 
     for V in V_grid:
-        bus.send({heater_id: float(V)})
+        bus.set(int(heater_id), float(V))   # or bus.set([heater_id], [float(V)])
         safe_sleep(settle_s)
         pd_vals = scope.read_many(avg=int(reads_avg))   # shape ~ (n_channels,)
         I_rows.append(pd_vals.astype(float))
@@ -364,7 +364,9 @@ MESH_HEATERS = list(range(0, 28))  # 0..27
 
 def _apply_biases(bus, bias_dict):
     if bias_dict:
-        bus.send({int(k): float(v) for k, v in bias_dict.items()})
+        chs = sorted(int(k) for k in bias_dict.keys())
+        vs  = [float(bias_dict[k]) for k in chs]
+        bus.set(chs, vs)
 
 def _phi_span_from_json(cal_json):
     # use best channel’s unwrapped phi to compute span
@@ -405,7 +407,9 @@ def batch_calibrate(
 
         if mid_bias_others is not None:
             print("[Batch] Setting mesh heaters to mid-bias before starting...")
-            bus.send({h: float(mid_bias_others) for h in heaters})
+            chs = list(map(int, heaters))
+            vs  = [float(mid_bias_others)] * len(chs)
+            bus.set(chs, vs)
             time.sleep(0.2)
 
         results = []
@@ -429,8 +433,10 @@ def batch_calibrate(
             print(f"[Batch] Calibrating heater {h:02d}...")
             # hold all mesh heaters (except 'h') at mid-bias to reduce drift
             if mid_bias_others is not None:
-                cmd = {hh: float(mid_bias_others) for hh in heaters if hh != h}
-                bus.send(cmd)
+                others = [int(hh) for hh in heaters if hh != h]
+                if others:
+                    bus.set(others, [float(mid_bias_others)] * len(others))
+
 
             # run per-heater calibration (uses ALL PD channels; picks best)
             outpath = calibrate_one_heater(
@@ -497,7 +503,7 @@ def main():
     )
 
     scope = RigolDualScopes([1,2,3,4], [1,2,3], serial_scope1=args.scope1 or 'HDO1B244000779')
-    bus = HeaterBus()
+    bus = DualAD5380Controller()
 
     try:
         batch_calibrate(
@@ -515,8 +521,6 @@ def main():
         )
     finally:
         try: scope.close()
-        except Exception: pass
-        try: bus.close()
         except Exception: pass
 
 if __name__ == "__main__":

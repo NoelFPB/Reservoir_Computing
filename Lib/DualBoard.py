@@ -120,10 +120,11 @@ class DualAD5380Controller:
         for c, val in zip(chs, vs):
             p = self._phys(c)
             chip, idx = self._chip_and_index(p)
-            self._handshake(chip)
+            #with only one board it seems that we dont need it, need to check if with 2 we do
+            #self._handshake(chip)
             d = con_A if chip=='A' else con_B
             self._write(d['ldac_1'])
             self._write(d['sync'])
             self._write(self._vol_hex(val) + f"{idx:02x}" + d['x_spr'])
-            self._write(d['ldac_2'])
+            #self._write(d['ldac_2'])
 

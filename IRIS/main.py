@@ -14,7 +14,7 @@ from sklearn.linear_model import LinearRegression, RidgeClassifierCV, LogisticRe
 
 # ---- Your hardware libs ----
 from Lib.scope import RigolDualScopes
-from Lib.heater_bus import HeaterBus
+from Lib.DualBoard import DualAD5380Controller
 
 # ==========================
 # CONFIG (IRIS + Hardware)
@@ -100,7 +100,7 @@ class PhotonicReservoirIrisOne2One:
         self.internal = [h for h in all_heaters if h not in ALL_INPUT_HEATERS]
 
         self.scope = RigolDualScopes(SCOPE1_CHANNELS, SCOPE2_CHANNELS, serial_scope1='HDO1B244000779')
-        self.bus   = HeaterBus()
+        self.bus   = DualAD5380Controller()
 
         rng = np.random.default_rng(42)   # or remove seed for different randomness each run
 
@@ -126,14 +126,25 @@ class PhotonicReservoirIrisOne2One:
                     micro.append(v)
             self.mask_matrix = np.vstack([np.ones((1, len(self.active))), np.array(micro, float)])
 
-        # Apply initial baseline
-        self.bus.send({**self.mesh_bias, **self.idle_bias, **self.base_bias})
+        # Apply initial baseline (mesh + idle + base; later keys override earlier ones)
+        baseline = {**self.mesh_bias, **self.idle_bias, **self.base_bias}
+
+        # Deterministic order → lists
+        chs = sorted(baseline.keys())
+        vs  = [baseline[h] for h in chs]
+        time.sleep(0.02)
+        # Direct hardware call (no HeaterBus)
+        self.bus.set(chs, vs)
+        # (Optional) keep your debug prints
+        print(self.mesh_bias)
+        print(self.base_bias)
+
 
     def close(self):
-        try:
-            self.scope.close()
-        finally:
-            self.bus.close()
+
+        self.scope.close()
+
+            #self.bus.close()
 
     def process_vector(self, x_norm01):
         """
@@ -152,14 +163,11 @@ class PhotonicReservoirIrisOne2One:
             v_act = V_BIAS_INPUT + GAIN * half * (x_ctr * m)              # per active heater
             v_act = np.clip(v_act, V_MIN, V_MAX)
             # Build command: active -> v_act; idle inputs held at bias; mesh at mesh_bias
-            cmd = {}
-            for h, vv in zip(self.active, v_act):
-                cmd[h] = float(vv)
-            # keep idle inputs at bias
-            for h in self.idle_inputs:
-                cmd[h] = V_BIAS_INPUT
-
-            self.bus.send(cmd)
+            cmd = {h: float(vv) for h, vv in zip(self.active, v_act)}
+            chs = sorted(cmd.keys())
+            vs  = [cmd[h] for h in chs]
+            print(chs,vs)
+            self.bus.set(chs, vs)
             pd = self.scope.read_many(avg=int(READ_AVG))    # returns detector vector
             features.append(pd)
 
@@ -189,18 +197,17 @@ class PhotonicReservoirIrisOne2One:
                 if np.all(missing <= 0):
                     break
 
-            try:
-                feats = self.process_vector(xv)
-                if not np.any(np.isnan(feats)):
-                    X_new.append(feats)
-                    y_new.append(lab)
-                    if need is not None:
-                        have[lab] += 1
-                        missing[lab] -= 1
-                else:
-                    print(f"[WARN] NaN features at idx {i}; skipped.")
-            except Exception as e:
-                print(f"[ERROR] Hardware fail at idx {i}: {e}")
+        
+            feats = self.process_vector(xv)
+            if not np.any(np.isnan(feats)):
+                X_new.append(feats)
+                y_new.append(lab)
+                if need is not None:
+                    have[lab] += 1
+                    missing[lab] -= 1
+            else:
+                print(f"[WARN] NaN features at idx {i}; skipped.")
+
 
         if len(X_new) == 0:
             print(f"[{phase_name}] No new samples measured.")
