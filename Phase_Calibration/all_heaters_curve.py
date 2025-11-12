@@ -350,13 +350,13 @@ def voltage_for_phase(cal, phi):
 # Your 7 input biases (keep them stable during all calibrations)
 INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]
 INPUT_BIAS = {
-    28: 1.732,
-    29: 1.764,
-    30: 2.223,
-    31: 2.372,
-    32: 1.881,
-    33: 2.436,
-    34: 2.852,
+    28: 0.1,
+    29: 0.1,
+    30: 0.1,
+    31: 0.1,
+    32: 0.1,
+    33: 0.1,
+    34: 0.1,
 }
 
 MESH_HEATERS = list(range(0, 28))  # 0..27
@@ -507,11 +507,11 @@ def main():
 
     try:
         batch_calibrate(
-            heaters=list(range(28)),  # 0..27
-            vmin=0.0, vmax=5.0,
-            points=100,               # 121–201 recommended
+            heaters=list(range(35)),  # 0..27
+            vmin=0.1, vmax=4.9,
+            points=25,               # 121–201 recommended
             settle=0.20,
-            reads=3,
+            reads=2,
             scope=scope,
             bus = bus,
             outdir="calibration",

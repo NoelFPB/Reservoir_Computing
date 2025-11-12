@@ -15,7 +15,7 @@ import pickle
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression, RidgeClassifierCV, LogisticRegression
 
-FEATURE_STORE = os.path.join("MNIST", "feature_store_gain0.6_row4_mask4.npz")
+FEATURE_STORE = os.path.join("MNIST", "feature_store_gain0.9_row7_mask4.npz")
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
@@ -23,18 +23,17 @@ SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
 INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]
 ALL_HEATERS = list(range(35))  # Omitting the second part of C
 V_MIN, V_MAX = 1.10, 4.90
-V_BIAS_INTERNAL = 0.1
-V_BIAS_INPUT = 3.4
+V_BIAS_INPUT = 3.0
 
-ROW_BANDS = 4 # How many 7-wide row bands to use 
+ROW_BANDS = 7 # How many 7-wide row bands to use 
 K_VIRTUAL = 4          # Still use virtual nodes for feature diversity
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
-SPATIAL_GAIN = 0.6     # How strongly pixels drive heaters Now should be less than 0.64
+SPATIAL_GAIN = 0.9     # How strongly pixels drive heaters Now should be less than 0.64
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 150 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.2      # 20% for testing
 
 #
@@ -223,6 +222,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
             for m in mask_matrix:
                 v = v_bias + base * m
                 v = np.clip(v, vmin, vmax)
+                #print(v)
                 #print("v", np.round(v, 2))
                 send(heaters, v.tolist())                   
                 pd = read_many(avg=readavg)
