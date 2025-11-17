@@ -8,12 +8,12 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # -----------------------------
 # Config
 # -----------------------------
-ROW_BANDS   = 7      # 28x28 -> 7 x ROW_BANDS
-K_VIRTUAL   = 2       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
+ROW_BANDS   = 5      # 28x28 -> 7 x ROW_BANDS
+K_VIRTUAL   = 1       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
 MASK_SEED   = 42
-TEST_SIZE   = 0.3
+TEST_SIZE   = 0.2
 SEED        = 42
-N_PER_CLASS = 300     # for speed
+N_PER_CLASS = 100    
 
 # -----------------------------
 # Helpers
@@ -86,7 +86,10 @@ def main():
     print("="*60)
 
     # Load MNIST
-    mnist = fetch_openml("mnist_784", version=1, parser="auto")
+    # mnist = fetch_openml("Kuzushiji-MNIST", version=1, as_frame=False, parser="auto")
+    # X = mnist.data.astype(np.float32) / 255.0
+    # y = mnist.target.astype(int)
+    mnist = fetch_openml("Fashion-MNIST", version=1, parser="auto")
     X = mnist.data.values.astype(np.float32) / 255.0
     y = mnist.target.values.astype(int)
 

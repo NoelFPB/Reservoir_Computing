@@ -1,4 +1,4 @@
-﻿import os
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -8,14 +8,16 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-
 from Lib.scope import RigolDualScopes
 from Lib.DualBoard import DualAD5380Controller
 import pickle
 import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression, RidgeClassifierCV
+from sklearn.linear_model import LinearRegression, RidgeClassifierCV, LogisticRegression
 
-FEATURE_STORE = os.path.join("MNIST", "K2_R7_G09_C3.npz")
+FEATURE_STORE = os.path.join("FASHION", "K1_R7_G04_0bias.npz")
+
+FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
+                   'Sandal','Shirt','Sneaker','Bag','Ankle boot']
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
@@ -26,15 +28,15 @@ V_MIN, V_MAX = 1.10, 4.90
 V_BIAS_INPUT = 3.0
 
 ROW_BANDS = 7 # How many 7-wide row bands to use 
-K_VIRTUAL = 2          # Still use virtual nodes for feature diversity
+K_VIRTUAL = 1          # Still use virtual nodes for feature diversity
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
-SPATIAL_GAIN = 0.9     # How strongly pixels drive heaters
+SPATIAL_GAIN = 0.5     # How strongly pixels drive heaters Now should be less than 0.64
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 150 # Samples per digit class (500 total for quick demo)
-TEST_FRACTION = 0.3      # % for testing
+N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)z
+TEST_FRACTION = 0.2      # 20% for testing
 
 #
 def load_feature_store(path=FEATURE_STORE):
@@ -74,7 +76,6 @@ def pick_balanced_subset(X, y, n_per_class, seed=42):
         xs.append(X[take])
         ys.append(y[take])
     return np.vstack(xs), np.concatenate(ys)
-#
       
 def hadamard_like_masks(n_masks, width=7, seed=0):
     rng = np.random.default_rng(seed)
@@ -95,20 +96,29 @@ def downsample_to_7xM(img2d: np.ndarray, M: int) -> np.ndarray:
     out = np.stack([b.mean(axis=0) for b in bands], axis=0)  # (M, 7)
     return out
 
-def load_mnist_pool(max_per_class=400):
-    """Return a larger candidate pool (downsampled to 7xROW_BANDS) to fill 'missing' needs."""
-    mnist = fetch_openml('mnist_784', version=1, parser='auto')
-    X, y = mnist.data.values / 255.0, mnist.target.values.astype(int)
+def load_fashion_mnist_pool(max_per_class=400):
+    """
+    Return a larger candidate pool (downsampled to 7xROW_BANDS)
+    to fill 'missing' needs, but using Fashion-MNIST instead of MNIST.
+    """
+    print("[Data] Loading Fashion-MNIST pool...")
+    fm = fetch_openml('Fashion-MNIST', version=1, as_frame=False)
+    X, y = fm.data / 255.0, fm.target.astype(int)
+
     X_resized = []
     for img in X:
         img_2d = img.reshape(28, 28)
-        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)
+        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)   # (ROW_BANDS × 7)
         X_resized.append(grid7xM.flatten())
-    X_resized = np.array(X_resized)
 
-    # Create a balanced pool up to max_per_class
+    X_resized = np.asarray(X_resized)
+
+    # Balanced candidate pool
     X_pool, y_pool = create_balanced_subset(X_resized, y, max_per_class)
+    print(f"[Data] Fashion-MNIST pool ready: {len(X_pool)} samples "
+          f"({max_per_class} per class).")
     return X_pool, y_pool
+
     
         
 def create_balanced_subset(X, y, n_per_class):
@@ -147,48 +157,14 @@ class PhotonicReservoir:
 
         # Fixed random mesh bias
 
-        # rng = np.random.default_rng(40)
-        # self.mesh_bias = {
-        #     h: float(rng.uniform(0.5, 4.5))
-        #     for h in self.internal_heaters
-        # }
+        rng = np.random.default_rng(42)
+        self.mesh_bias = {
+            h: float(rng.uniform(0.1, V_MAX))
+            for h in self.internal_heaters
+        }
 
-        non_linear = { 
-            "0": 0.9376912722184974,
-            "1": 2.932811910592447,
-            "2": 4.870232771887507,
-            "3": 2.747595223636186,
-            "4": 3.534331730073851,
-            "5": 3.3070095327334688,
-            "6": 2.1458412104619544,
-            "7": 4.325086620844977,
-            "8": 1.6908731743669076,
-            "9": 1.3058621175923306,
-            "10": 4.125449162268126,
-            "11": 0.20089784494384588,
-            "12": 1.6597651788140848,
-            "13": 3.0498915616596793,
-            "14": 2.8154673480274153,
-            "15": 2.5488147867448987,
-            "16": 4.570875049827333,
-            "17": 4.111411907293558,
-            "18": 2.2969750044993855,
-            "19": 3.405531075752599,
-            "20": 4.371880546871272,
-            "21": 4.05447622003967,
-            "22": 2.0274493964248994,
-            "23": 0.3243238099065112,
-            "24": 2.7354202604405935,
-            "25": 4.013031496874742,
-            "26": 0.994075844478976,
-            "27": 4.817359643186241}
-        
-        # Convert keys to int and restrict to internal heaters
-        non_linear_int = {int(k): float(v) for k, v in non_linear.items()}
-        self.mesh_bias = {h: non_linear_int[h] for h in self.internal_heaters}
-        
         self.input_bias = {h: V_BIAS_INPUT for h in range(28, 35)}
-        
+
         self.mask = hadamard_like_masks(K_VIRTUAL - 1, 7, seed=42)
 
         # Apply initial baseline
@@ -197,10 +173,8 @@ class PhotonicReservoir:
         chs = sorted(baseline.keys())
         vs = [baseline[h] for h in chs]
         self.bus.set(chs, vs)
-
         print(self.input_bias)
         print(self.mesh_bias)
-        #time.sleep(0.5)
 
     def close(self):
         self.scope.close()
@@ -243,12 +217,10 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
                 np.ones((1, chunk_size), dtype=float),             # baseline mask
                 np.asarray(self.mask[:need], dtype=float)   # +/-1 masks
             ])
-
         send = self.bus.set
         read_many = self.scope.read_many
 
         features = []
-
         for i in range(num_chunks):
             sl = slice(i*chunk_size, (i+1)*chunk_size)
             base = gain * half_swing * x_centered[sl]            # shape (7,)
@@ -256,11 +228,9 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
             for m in mask_matrix:
                 v = v_bias + base * m
                 v = np.clip(v, vmin, vmax)
-                #print(v)
-                #print("v", np.round(v, 2))
-                send(heaters, v.tolist())                   
+                print(v)
+                send(heaters, v.tolist())            
                 pd = read_many(avg=readavg)
-                #print(pd)
                 features.append(pd)
 
         return np.asarray(features, float).ravel()
@@ -304,6 +274,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
                     print(f"[WARNING] NaN features at candidate {i}; skipped.")
             except Exception as e:
                 print(f"[ERROR] Failed at candidate {i}: {e}")
+             
 
         if len(X_new) == 0:
             print(f"[{phase_name}] No new samples measured.")
@@ -405,6 +376,30 @@ def train_mnist_classifier(X_features, y_labels, *, seed=42):
         "n_classes": n_classes,
     }
 
+    # ---- C) Logistic Regression (multinomial) ----
+    # logreg = LogisticRegression(max_iter=20000, solver="lbfgs", C=0.3)
+    # logreg.fit(X_train_s, y_train)
+
+    # y_pred_tr3 = logreg.predict(X_train_s)
+    # y_pred_te3 = logreg.predict(X_test_s)
+    # acc_tr3 = accuracy_score(y_train, y_pred_tr3)
+    # acc_te3 = accuracy_score(y_test, y_pred_te3)
+
+    # print(f"\n[LOGREG] Train acc: {acc_tr3:.3f} | Test acc: {acc_te3:.3f}")
+    # print("[LOGREG] Classification report (test):")
+    # print(classification_report(y_test, y_pred_te3, zero_division=0))
+    # print("[LOGREG] Confusion matrix (test):")
+    # print(confusion_matrix(y_test, y_pred_te3))
+
+    # models["logreg"] = logreg
+    # results["logreg"] = {
+    #     "train_accuracy": acc_tr3,
+    #     "test_accuracy": acc_te3,
+    #     "y_pred": y_pred_te3,
+    #     "n_features": X_features.shape[1],
+    #     "n_classes": n_classes,
+    # }
+
     # store scaler for later inference
     results["scaler"] = scaler
 
@@ -434,35 +429,23 @@ def visualize_results(X_images, y_labels, classifier, X_test, y_test, results, *
     y_pred = np.asarray(results[key]["y_pred"])
 
     # ensure output folder exists
-    save_dir=os.path.join("MNIST", "figures")
+    save_dir=os.path.join("FASHION", "figures")
     os.makedirs(save_dir, exist_ok=True)
 
     plt.figure(figsize=(12, 4))
 
     # --- Confusion Matrix ---
+    labels = FASHION_CLASSES  # for Fashion-MNIST; keep range(10) for digits
+
     plt.subplot(1, 2, 1)
     cm = confusion_matrix(y_test, y_pred)
-    plt.imshow(cm, interpolation='nearest')  # default colormap
+    plt.imshow(cm, interpolation='nearest')
     plt.title(f'Confusion Matrix ({key})')
     plt.colorbar()
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
-
-    # --- Per-digit accuracy ---
-    plt.subplot(1, 2, 2)
-    digit_accuracies = []
-    for digit in range(10):
-        mask = (y_test == digit)
-        if np.any(mask):
-            acc = accuracy_score(y_test[mask], y_pred[mask])
-        else:
-            acc = 0.0
-        digit_accuracies.append(acc)
-    plt.bar(range(10), digit_accuracies)
-    plt.xlabel('Digit')
-    plt.ylabel('Accuracy')
-    plt.title(f'Per-Digit Accuracy ({key})')
-    plt.xticks(range(10))
+    plt.xticks(ticks=range(10), labels=labels, rotation=45, ha='right', fontsize=8)
+    plt.yticks(ticks=range(10), labels=labels, fontsize=8)
 
     # --- Title metadata (robust best model selection) ---
     meta = meta or {}
@@ -491,7 +474,7 @@ def visualize_results(X_images, y_labels, classifier, X_test, y_test, results, *
     from datetime import datetime
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     tag = f"_{run_tag}" if run_tag else ""
-    fname_base = f"results{tag}_{ts}"
+    fname_base = f"mnist_photonic_results{tag}_{ts}"
     png_path = os.path.join(save_dir, fname_base + ".png")
     plt.savefig(png_path, dpi=200, bbox_inches='tight')
     plt.show()
@@ -522,7 +505,6 @@ def main_mnist():
     print("="*60)
     t0 = time.perf_counter()
     reservoir = None
-
     try:
         # ---------- FAST PATH: skip hardware if cache already satisfies target ----------
         X_cached, y_cached = load_feature_store(FEATURE_STORE)
@@ -545,24 +527,24 @@ def main_mnist():
                 total_time = time.perf_counter() - t0
                 visualize_results(None, None, models, *test_data, results,
                                   meta=meta,
-                                  total_seconds=total_time, run_tag="cached")
+                                  total_seconds=total_time, run_tag="mnist_photonic_cached")
                 # Save artifacts (reusing your existing save block)
-                # os.makedirs("models", exist_ok=True)
-                # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                # save_path = os.path.join("MNIST","models", f"classifier_{timestamp}.pkl")
-                # os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                # with open(save_path, 'wb') as f:
-                #     pickle.dump({'models': models, 'results': results,
-                #                  'config': {'INPUT_HEATERS': INPUT_HEATERS,
-                #                             'SPATIAL_GAIN': SPATIAL_GAIN,
-                #                             'K_VIRTUAL': K_VIRTUAL}}, f)
-                # print(f"Classifier saved to '{save_path}'")
+                os.makedirs("models", exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_path = os.path.join("MNIST","models", f"mnist_photonic_classifier_{timestamp}.pkl")
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                with open(save_path, 'wb') as f:
+                    pickle.dump({'models': models, 'results': results,
+                                 'config': {'INPUT_HEATERS': INPUT_HEATERS,
+                                            'SPATIAL_GAIN': SPATIAL_GAIN,
+                                            'K_VIRTUAL': K_VIRTUAL}}, f)
+                print(f"Classifier saved to '{save_path}'")
                 return
         # ---------- END FAST PATH ----------
         else:
             counts = np.zeros(10, dtype=int)
         # Get a big candidate pool; we will only measure what’s missing
-        X_pool, y_pool = load_mnist_pool(max_per_class=target)
+        X_pool, y_pool = load_fashion_mnist_pool(max_per_class=max(target, 200))
 
         reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
 
@@ -662,7 +644,7 @@ def main_mnist():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Build full save path
-        save_path = os.path.join("MNIST","models", f"classifier_{timestamp}.pkl")
+        save_path = os.path.join("MNIST","models", f"mnist_photonic_classifier_{timestamp}.pkl")
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
         with open(save_path, 'wb') as f:
@@ -675,7 +657,7 @@ def main_mnist():
                     'K_VIRTUAL': K_VIRTUAL
                 }
             }, f)
-        print("Classifier saved to 'classifier.pkl'")
+        print("Classifier saved to 'mnist_photonic_classifier.pkl'")
         
     except KeyboardInterrupt:
         print("\nInterrupted by user")

@@ -6,19 +6,6 @@ import usb.util
 import usb.backend.libusb1 as libusb1
 from importlib import resources as ir
 
-# dac_map = [
-#     30,31,28,29,26,27,24,25,
-#     65,64,67,66,69,68,71,70,
-#     40,41,42,43,44,45,46,47,
-#      1, 0, 3, 2, 5, 4, 7, 6,
-#     72,73,74,75,76,77,78,79,
-#     33,32,35,34,37,36,39,38,
-#     49,48,51,50,53,52,55,54,
-#      8, 9,10,11,12,13,14,15,
-#     57,56,59,58,61,60,63,62,
-#     16,17,18,19,20,21,22,23
-# ]
-
 # Now V0 is 0 on CON A
 # V80 is V 39 on the board CON B
 dac_map = list(range(80))  
@@ -120,11 +107,11 @@ class DualAD5380Controller:
         for c, val in zip(chs, vs):
             p = self._phys(c)
             chip, idx = self._chip_and_index(p)
-            #with only one board it seems that we dont need it, need to check if with 2 we do
-            #self._handshake(chip)
+            #It seems like we only needed when first connecting
+            self._handshake(chip)
             d = con_A if chip=='A' else con_B
             self._write(d['ldac_1'])
             self._write(d['sync'])
             self._write(self._vol_hex(val) + f"{idx:02x}" + d['x_spr'])
-            #self._write(d['ldac_2'])
+            self._write(d['ldac_2'])
 
