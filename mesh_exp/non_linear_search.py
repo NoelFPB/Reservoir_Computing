@@ -18,7 +18,7 @@ VMIN, VMAX     = 0.1, 4.90
 
 # Input probing around center (for curvature)
 INPUT_CENTER   = 3.2
-DELTA_V        = 0.1                              # small central diff step
+DELTA_V        = 0.9                              # small central diff step
 SETTLE_MESH    = 0.10
 AVG_READS      = 1
 EPS            = 1e-12

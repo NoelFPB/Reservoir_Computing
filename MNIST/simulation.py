@@ -11,9 +11,9 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 ROW_BANDS   = 7      # 28x28 -> 7 x ROW_BANDS
 K_VIRTUAL   = 2       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
 MASK_SEED   = 42
-TEST_SIZE   = 0.3
+TEST_SIZE   = 0.2
 SEED        = 42
-N_PER_CLASS = 300     # for speed
+N_PER_CLASS = 3000    
 
 # -----------------------------
 # Helpers

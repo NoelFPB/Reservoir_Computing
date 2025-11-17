@@ -15,7 +15,7 @@ import pickle
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression, RidgeClassifierCV
 
-FEATURE_STORE = os.path.join("MNIST", "K2_R7_G09_C3.npz")
+FEATURE_STORE = os.path.join("MNIST", "centered_5.npz")
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
@@ -30,7 +30,7 @@ K_VIRTUAL = 2          # Still use virtual nodes for feature diversity
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
-SPATIAL_GAIN = 0.9     # How strongly pixels drive heaters
+SPATIAL_GAIN = 0.5     # How strongly pixels drive heaters
 
 # Dataset parameters
 N_SAMPLES_PER_DIGIT = 150 # Samples per digit class (500 total for quick demo)
@@ -154,34 +154,34 @@ class PhotonicReservoir:
         # }
 
         non_linear = { 
-            "0": 0.9376912722184974,
-            "1": 2.932811910592447,
-            "2": 4.870232771887507,
-            "3": 2.747595223636186,
-            "4": 3.534331730073851,
-            "5": 3.3070095327334688,
-            "6": 2.1458412104619544,
-            "7": 4.325086620844977,
-            "8": 1.6908731743669076,
-            "9": 1.3058621175923306,
-            "10": 4.125449162268126,
-            "11": 0.20089784494384588,
-            "12": 1.6597651788140848,
-            "13": 3.0498915616596793,
-            "14": 2.8154673480274153,
-            "15": 2.5488147867448987,
-            "16": 4.570875049827333,
-            "17": 4.111411907293558,
-            "18": 2.2969750044993855,
-            "19": 3.405531075752599,
-            "20": 4.371880546871272,
-            "21": 4.05447622003967,
-            "22": 2.0274493964248994,
-            "23": 0.3243238099065112,
-            "24": 2.7354202604405935,
-            "25": 4.013031496874742,
-            "26": 0.994075844478976,
-            "27": 4.817359643186241}
+   "0": 1.7853904234610525,
+    "1": 3.9022395818962865,
+    "2": 3.4223111619389126,
+    "3": 2.4971787638795395,
+    "4": 1.8963896518960541,
+    "5": 1.1068648194949702,
+    "6": 2.9554445658536004,
+    "7": 0.5330617295582464,
+    "8": 1.9172321602106142,
+    "9": 3.7012401411093867,
+    "10": 0.2735747711483811,
+    "11": 3.9029479467838852,
+    "12": 1.150848727946267,
+    "13": 1.9616737778054558,
+    "14": 2.33946694506806,
+    "15": 4.767814963231383,
+    "16": 2.3976954551851035,
+    "17": 4.102495569246013,
+    "18": 4.776705359358654,
+    "19": 1.023729131048344,
+    "20": 3.3431763556277936,
+    "21": 3.7907612005706723,
+    "22": 3.0525999089728053,
+    "23": 0.42266563242368727,
+    "24": 4.334764352513629,
+    "25": 1.0544151860651643,
+    "26": 3.3504170947950342,
+    "27": 4.017546906306938}
         
         # Convert keys to int and restrict to internal heaters
         non_linear_int = {int(k): float(v) for k, v in non_linear.items()}
@@ -212,7 +212,50 @@ class PhotonicReservoir:
 class PhotonicReservoirMNIST(PhotonicReservoir):
     def __init__(self, input_heaters, all_heaters):
         super().__init__(input_heaters, all_heaters)
-        
+    
+
+    def NO_mask_process_spatial_pattern(self, image_pixels):
+        """
+        Map image pixels directly into heater voltages between V_MIN and V_MAX,
+        without masks (K_VIRTUAL is ignored for this test).
+
+        For each 7-pixel chunk:
+            x in [0,1]  ->  v = V_MIN + (V_MAX - V_MIN) * x
+        """
+        readavg = int(READ_AVG)
+        vmin    = float(V_MIN)
+        vmax    = float(V_MAX)
+        heaters = self.input_heaters
+        chunk_size = len(heaters)  # 7
+
+        # Flatten image and keep only full 7-pixel chunks
+        x = np.asarray(image_pixels, float).ravel()
+        total_pixels = (x.size // chunk_size) * chunk_size
+        x = x[:total_pixels]
+        num_chunks = total_pixels // chunk_size
+
+        send = self.bus.set
+        read_many = self.scope.read_many
+
+        features = []
+
+        scale = vmax - vmin  # full usable swing
+
+        for i in range(num_chunks):
+            sl = slice(i * chunk_size, (i + 1) * chunk_size)
+            px = x[sl]  # length 7, values in [0,1] after preprocessing
+
+            # Direct mapping 0→VMIN, 1→VMAX
+            v = vmin + scale * px
+            v = np.clip(v, vmin, vmax)
+            print(v)
+            # Drive heaters and read PDs
+            send(heaters, v.tolist())
+            pd = read_many(avg=readavg)
+            features.append(pd)
+
+        return np.asarray(features, float).ravel()
+
     def process_spatial_pattern(self, image_pixels):
         K_req   = int(K_VIRTUAL)
         readavg = int(READ_AVG)
@@ -658,24 +701,24 @@ def main_mnist():
         print(f"Feature dimensionality: {n_features} -> expanded features")
         
         # Save classifier for future use
-        os.makedirs("models", exist_ok=True)
+        #os.makedirs("models", exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Build full save path
-        save_path = os.path.join("MNIST","models", f"classifier_{timestamp}.pkl")
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        #save_path = os.path.join("MNIST","models", f"classifier_{timestamp}.pkl")
+       # os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-        with open(save_path, 'wb') as f:
-            pickle.dump({
-                'models': models,
-                'results': results,
-                'config': {
-                    'INPUT_HEATERS': INPUT_HEATERS,
-                    'SPATIAL_GAIN': SPATIAL_GAIN,
-                    'K_VIRTUAL': K_VIRTUAL
-                }
-            }, f)
-        print("Classifier saved to 'classifier.pkl'")
+        # with open(save_path, 'wb') as f:
+        #     pickle.dump({
+        #         'models': models,
+        #         'results': results,
+        #         'config': {
+        #             'INPUT_HEATERS': INPUT_HEATERS,
+        #             'SPATIAL_GAIN': SPATIAL_GAIN,
+        #             'K_VIRTUAL': K_VIRTUAL
+        #         }
+        #     }, f)
+        # print("Classifier saved to 'classifier.pkl'")
         
     except KeyboardInterrupt:
         print("\nInterrupted by user")
