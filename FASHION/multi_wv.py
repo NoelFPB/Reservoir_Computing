@@ -16,7 +16,7 @@ from sklearn.linear_model import LinearRegression, RidgeClassifierCV
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
-
+LOAD = 1
 INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]
 ALL_HEATERS = list(range(35))  # Omitting the second part of C
 V_MIN, V_MAX = 1.10, 4.90
@@ -24,13 +24,15 @@ V_BIAS_INPUT = 3.0
 LASER_ADDRESS = "GPIB0::6::INSTR"
 ROW_BANDS = 7 # How many 7-wide row bands to use 
 K_VIRTUAL = 1          # Still use virtual nodes for feature diversity
+FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
+                   'Sandal','Shirt','Sneaker','Bag','Ankle boot']
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
 SPATIAL_GAIN = 0.5     # How strongly pixels drive heaters
 
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 250 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.3      # % for testing
 
 
@@ -72,7 +74,7 @@ def select_images_for_missing(X_pool, y_pool, missing_per_class, seed=42):
 
 def load_latest_multi_lambda(base_dir="MNIST/multi_wavelength"):
     base_path = Path(base_dir)
-    files = list(base_path.glob("multi_lambda_*.npz"))
+    files = list(base_path.glob("multi_lambda_20251118_205553.npz"))
     if not files:
         raise FileNotFoundError(f"No multi_lambda_*.npz files found in {base_dir}")
     latest = max(files, key=lambda f: f.stat().st_mtime)
@@ -159,19 +161,28 @@ def downsample_to_7xM(img2d: np.ndarray, M: int) -> np.ndarray:
     out = np.stack([b.mean(axis=0) for b in bands], axis=0)  # (M, 7)
     return out
 
+
 def load_mnist_pool(max_per_class=400):
-    """Return a larger candidate pool (downsampled to 7xROW_BANDS) to fill 'missing' needs."""
-    mnist = fetch_openml('mnist_784', version=1, parser='auto')
-    X, y = mnist.data.values / 255.0, mnist.target.values.astype(int)
+    """
+    Return a larger candidate pool (downsampled to 7xROW_BANDS)
+    to fill 'missing' needs, but using Fashion-MNIST instead of MNIST.
+    """
+    print("[Data] Loading Fashion-MNIST pool...")
+    fm = fetch_openml('Fashion-MNIST', version=1, as_frame=False)
+    X, y = fm.data / 255.0, fm.target.astype(int)
+
     X_resized = []
     for img in X:
         img_2d = img.reshape(28, 28)
-        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)
+        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)   # (ROW_BANDS × 7)
         X_resized.append(grid7xM.flatten())
-    X_resized = np.array(X_resized)
 
-    # Create a balanced pool up to max_per_class
+    X_resized = np.asarray(X_resized)
+
+    # Balanced candidate pool
     X_pool, y_pool = create_balanced_subset(X_resized, y, max_per_class)
+    print(f"[Data] Fashion-MNIST pool ready: {len(X_pool)} samples "
+          f"({max_per_class} per class).")
     return X_pool, y_pool
     
         
@@ -534,31 +545,19 @@ def visualize_results(X_images, y_labels, classifier, X_test, y_test, results, *
     os.makedirs(save_dir, exist_ok=True)
 
     plt.figure(figsize=(12, 4))
-
+    
     # --- Confusion Matrix ---
+    labels = FASHION_CLASSES  # for Fashion-MNIST; keep range(10) for digits
+
     plt.subplot(1, 2, 1)
     cm = confusion_matrix(y_test, y_pred)
-    plt.imshow(cm, interpolation='nearest')  # default colormap
+    plt.imshow(cm, interpolation='nearest')
     plt.title(f'Confusion Matrix ({key})')
     plt.colorbar()
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
-
-    # --- Per-digit accuracy ---
-    plt.subplot(1, 2, 2)
-    digit_accuracies = []
-    for digit in range(10):
-        mask = (y_test == digit)
-        if np.any(mask):
-            acc = accuracy_score(y_test[mask], y_pred[mask])
-        else:
-            acc = 0.0
-        digit_accuracies.append(acc)
-    plt.bar(range(10), digit_accuracies)
-    plt.xlabel('Digit')
-    plt.ylabel('Accuracy')
-    plt.title(f'Per-Digit Accuracy ({key})')
-    plt.xticks(range(10))
+    plt.xticks(ticks=range(10), labels=labels, rotation=45, ha='right', fontsize=8)
+    plt.yticks(ticks=range(10), labels=labels, fontsize=8)
 
     # --- Title metadata (robust best model selection) ---
     meta = meta or {}
@@ -630,76 +629,69 @@ def main_mnist_dual_wavelength():
         # ----------------------------------------
         # TRY TO LOAD EXISTING MULTI-λ DATASET
         # ----------------------------------------
-        try:
-            data = load_latest_multi_lambda(base_dir="MNIST/dual_wavelength")
-            X_stack = data["X_stack"]        # (N, L, D)
-            X_feat_concat = data["X_concat"] # (N, L*D)
-            y_all = data["y"]               # (N,)
-            wavelengths = data["wavelengths"]
+  
+        data = load_latest_multi_lambda(base_dir="MNIST/dual_wavelength")
+        X_stack = data["X_stack"]        # (N, L, D)
+        X_feat_concat = data["X_concat"] # (N, L*D)
+        y_all = data["y"]               # (N,)
+        wavelengths = data["wavelengths"]
 
-            counts = per_class_counts(y_all, n_classes=10)
-            print(f"[FASTPATH] Existing per-class counts: {counts} (target={N_SAMPLES_PER_DIGIT})")
-            print(f"[FASTPATH] Existing wavelengths (nm): {wavelengths}")
+        counts = per_class_counts(y_all, n_classes=10)
+        print(f"[FASTPATH] Existing per-class counts: {counts} (target={N_SAMPLES_PER_DIGIT})")
+        print(f"[FASTPATH] Existing wavelengths (nm): {wavelengths}")
 
-            if np.all(counts >= N_SAMPLES_PER_DIGIT) and len(wavelengths) == len(WAVELENGTHS):
-                print("[FASTPATH] Existing multi-λ dataset satisfies target. Skipping measurement.")
+        counts = per_class_counts(y_all, n_classes=10)
+
+        if len(wavelengths) == len(WAVELENGTHS):
+            # We have some data already → check missing per class
+            if np.all(counts >= N_SAMPLES_PER_DIGIT):
+                print("[FASTPATH] Dataset complete. Skipping measurement.")
+                need_measurement = False
             else:
-                raise FileNotFoundError(
-                    f"Existing multi-λ dataset does not satisfy target or λ count mismatch "
-                    f"(have counts={counts}, wavelengths={wavelengths}, target={N_SAMPLES_PER_DIGIT}, "
-                    f"expected L={len(WAVELENGTHS)})."
-                )
+                print("[PARTIAL] Dataset incomplete. Will measure missing samples.")
+                need_measurement = True
+        else:
+            print("[MISMATCH] Wavelength count mismatch → full rebuild")
+            need_measurement = True
 
-        except FileNotFoundError as e:
-            # ----------------------------------------
-            # NO SUITABLE FILE → FRESH MEASUREMENT
-            # ----------------------------------------
-            print(f"[INFO] {e}")
-            print("[INFO] Starting full hardware measurement for multi-λ run...")
 
-            print("[SETUP] Loading MNIST pool...")
+        if need_measurement:
+            print("[INFO] Measuring missing samples...")
+
             X_pool, y_pool = load_mnist_pool(max_per_class=N_SAMPLES_PER_DIGIT)
 
-            print("[SETUP] Creating balanced subset...")
-            X_imgs, y_imgs = create_balanced_subset(
-                X_pool, y_pool, n_per_class=N_SAMPLES_PER_DIGIT
-            )
-            print(f"[SETUP] Using {len(y_imgs)} images total for measurement.")
+            # Determine missing counts
+            missing_per_class = np.maximum(N_SAMPLES_PER_DIGIT - counts, 0)
+
+            # Select only the needed images
+            X_needed, y_needed = select_images_for_missing(X_pool, y_pool, missing_per_class)
 
             reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
 
-            X_feats = []   # list of (N, D) arrays, one per wavelength
-            y_ref   = None
+            X_new_list = []
 
             for i, wl in enumerate(WAVELENGTHS):
-                X_i, y_i = measure_dataset_at_wavelength(
-                    reservoir, X_imgs, y_imgs, wl, phase_tag=f"LAMBDA{i+1}"
+                X_new, y_new = measure_dataset_at_wavelength(
+                    reservoir, X_needed, y_needed, wl, phase_tag=f"LAMBDA{i+1}"
                 )
-                X_feats.append(X_i)
+                X_new_list.append(X_new)
 
-                if y_ref is None:
-                    y_ref = y_i
-                else:
-                    if not np.array_equal(y_ref, y_i):
-                        raise RuntimeError(f"Label mismatch between wavelength runs (index {i})!")
-
-            y_all = y_ref
-            print("[MEASURE] Feature shapes per λ:")
-            for wl, X_i in zip(WAVELENGTHS, X_feats):
-                print(f"  λ={wl} nm: {X_i.shape}")
-
-            # Build X_stack and concatenated features
-            X_stack = np.stack(X_feats, axis=1)      # (N, L, D)
-            X_feat_concat = np.hstack(X_feats)       # (N, L*D)
-            print(f"[COMBINE] X_stack shape  : {X_stack.shape}  (N, L, D)")
-            print(f"[COMBINE] X_concat shape : {X_feat_concat.shape}")
-
-            # Save the multi-λ dataset
-            save_path = save_multi_wavelength_features(
-                X_feats, y_all, WAVELENGTHS,
+            # Combine old+new
+            X_stack_new = np.concatenate([X_stack, np.stack(X_new_list, axis=1)], axis=0)
+            X_concat_new = np.hstack([X_concat, np.hstack(X_new_list)])
+            y_all_new = np.concatenate([y_all, y_new])
+            
+            # Overwrite dataset
+            save_multi_wavelength_features(
+                [X_stack_new[:, i, :] for i in range(len(WAVELENGTHS))],
+                y_all_new,
+                WAVELENGTHS,
                 base_dir="MNIST/dual_wavelength"
             )
-            print(f"[INFO] Multi-λ dataset saved at: {save_path}")
+
+            # Use new values from here
+            X_stack, X_concat, y_all = X_stack_new, X_concat_new, y_all_new
+
 
         # ----------------------------------------
         # COMMON PART: TRAINING & VISUALIZATION

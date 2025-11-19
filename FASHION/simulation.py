@@ -8,12 +8,12 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # -----------------------------
 # Config
 # -----------------------------
-ROW_BANDS   = 5      # 28x28 -> 7 x ROW_BANDS
+ROW_BANDS   = 7      # 28x28 -> 7 x ROW_BANDS
 K_VIRTUAL   = 1       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
 MASK_SEED   = 42
-TEST_SIZE   = 0.2
+TEST_SIZE   = 0.3
 SEED        = 42
-N_PER_CLASS = 100    
+N_PER_CLASS = 150    
 
 # -----------------------------
 # Helpers
@@ -111,6 +111,10 @@ def main():
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_test  = scaler.transform(X_test)
+    import matplotlib.pyplot as plt
+    plt.imshow(X.reshape(-1,28,28)[0], cmap='gray')
+    plt.title(f"Label = {y[0]}")
+    plt.show()
 
     results = {}
 
@@ -175,6 +179,7 @@ def main():
     print(f"Best head: {best[0]}  |  test acc = {best[1]['test_acc']:.3f}")
     print("-"*60)
 
+    
     return results
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from datetime import datetime
 
 from Lib.DualBoard import DualAD5380Controller
 from Lib.scope import RigolDualScopes
+from scipy.linalg import hadamard
 
 # ========= Config =========
 
@@ -19,12 +20,21 @@ from Lib.scope import RigolDualScopes
 MESH_HEATERS   = list(range(28))                 # 0..27
 # 7 input heaters that feed the PDs
 INPUT_HEATERS  = [28, 29, 30, 31, 32, 33, 34]    # 7 "ports"
+# ==== Match the ELM spatial modulation ====
+# If your input bias is a scalar (same for all 7 heaters):
+INPUT_VBIAS = [3.0] * len(INPUT_HEATERS)
+
+
+# Or, if you use per-channel biases, you can use a list:
+# INPUT_VBIAS = [3.2, 3.2, 3.2, 3.2, 3.2, 3.2, 3.2]
 
 OUT_DIR        = "mesh_mixing_tests"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Safe voltage window for all heaters
-VMIN, VMAX     = 0.1, 4.90
+VMIN, VMAX     = 1.1, 4.90
+SPATIAL_GAIN = 0.8       # <-- set this to the same 'gain'
+HALF_SWING = 0.5 * (VMAX - VMIN)
 
 # Settle times
 SETTLE_MESH    = 0.10    # after changing mesh voltages
@@ -34,28 +44,91 @@ AVG_READS      = 1       # scope averaging
 EPS            = 1e-12
 
 # How many random meshes to test
-N_RANDOM_MESHES = 50
-
-# Input patterns for 7 input heaters
-# We'll use 7 "one-hot-ish" patterns:
-#   For column j: heater j = HIGH, others = LOW.
-INPUT_LOW      = 2.4
-INPUT_HIGH     = 4.0
-
-def build_input_patterns():
+N_RANDOM_MESHES = 100
+def build_hadamard_patterns(v_low, v_high):
     """
-    Build a list of 7 patterns, each is a length-7 list of voltages
-    on INPUT_HEATERS. Pattern j excites primarily port j.
+    Build 7 patterns using a 7×7 submatrix of Hadamard(8).
+
+    For column j:
+        pattern[i] = v_high[i] if H[i,j] == +1 else v_low[i]
+
+    This excites ALL 7 inputs simultaneously using an orthogonal basis,
+    giving MUCH better mixing measurement.
     """
+    v_low  = np.asarray(v_low, float)
+    v_high = np.asarray(v_high, float)
+
+    # Build an 8×8 Hadamard matrix and take its top-left 7×7 corner.
+    H = hadamard(8)[:7, :7]   # shape = (7, 7)
+
     patterns = []
-    n = len(INPUT_HEATERS)
-    for j in range(n):
-        v = [INPUT_LOW] * n
-        v[j] = INPUT_HIGH
-        patterns.append(v)
+    for col in range(7):
+        p = []
+        for i in range(7):
+            if H[i, col] > 0:
+                p.append(v_high[i])
+            else:
+                p.append(v_low[i])
+        patterns.append(p)
+
     return patterns
 
-INPUT_PATTERNS = build_input_patterns()
+def compute_input_range_from_gain(v_bias, gain, half_swing, vmin_hw, vmax_hw):
+    """
+    Given the same v_bias, gain, and half_swing as in the main ELM code,
+    compute the effective low/high voltages per input channel.
+
+    v_bias can be scalar or a list/array of length len(INPUT_HEATERS).
+    """
+    v_bias = np.asarray(v_bias, float)
+
+    # base "swing" from the spatial modulation
+    base = gain * half_swing        # scalar
+
+    v_low  = v_bias - base
+    v_high = v_bias + base
+
+    # clip to hardware safety window
+    v_low  = np.clip(v_low,  vmin_hw, vmax_hw)
+    v_high = np.clip(v_high, vmin_hw, vmax_hw)
+
+    return v_low, v_high
+
+
+def build_input_patterns_from_gain(v_low, v_high):
+    """
+    Build 7 "one-hot-ish" patterns using per-channel low/high,
+    so that each pattern j has:
+
+        v_k = v_low[k]   for k != j
+        v_j = v_high[j]
+
+    This mimics one channel being "strongly excited" within the
+    same modulation window as the ELM (set by gain/half_swing).
+    """
+    v_low  = np.asarray(v_low, float)
+    v_high = np.asarray(v_high, float)
+
+    n = len(INPUT_HEATERS)
+    patterns = []
+    for j in range(n):
+        v = v_low.copy()
+        v[j] = v_high[j]
+        patterns.append(v.tolist())
+    return patterns
+
+
+# Compute the actual low/high vectors and patterns
+V_LOW, V_HIGH = compute_input_range_from_gain(
+    v_bias=INPUT_VBIAS,
+    gain=SPATIAL_GAIN,
+    half_swing=HALF_SWING,
+    vmin_hw=VMIN,
+    vmax_hw=VMAX,
+)
+
+#INPUT_PATTERNS = build_input_patterns_from_gain(V_LOW, V_HIGH)
+INPUT_PATTERNS = build_hadamard_patterns(V_LOW, V_HIGH)
 
 
 # ========= Helpers =========
