@@ -16,7 +16,6 @@ from sklearn.linear_model import LinearRegression, RidgeClassifierCV
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
-LOAD = 1
 INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]
 ALL_HEATERS = list(range(35))  # Omitting the second part of C
 V_MIN, V_MAX = 1.10, 4.90
@@ -29,14 +28,14 @@ FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
-SPATIAL_GAIN = 0.5     # How strongly pixels drive heaters
-
+SPATIAL_GAIN = 0.25     # How strongly pixels drive heaters
+LOAD_PATH = 'none*.npz'
 # Dataset parameters
 N_SAMPLES_PER_DIGIT = 250 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.3      # % for testing
 
 
-WAVELENGTHS = [1548.0, 1550.0, 1552.0]  # or however many you want
+WAVELENGTHS = [1548.0, 1552.0]  # or however many you want
 
 #
 def select_images_for_missing(X_pool, y_pool, missing_per_class, seed=42):
@@ -72,9 +71,9 @@ def select_images_for_missing(X_pool, y_pool, missing_per_class, seed=42):
     print(f"[SELECT] Selected {len(y_new)} new images (per-class missing now: {missing})")
     return X_new, y_new
 
-def load_latest_multi_lambda(base_dir="MNIST/multi_wavelength"):
+def load_latest_multi_lambda(base_dir="FASHION/dual_wavelength"):
     base_path = Path(base_dir)
-    files = list(base_path.glob("multi_lambda_20251118_205553.npz"))
+    files = list(base_path.glob(LOAD_PATH))
     if not files:
         raise FileNotFoundError(f"No multi_lambda_*.npz files found in {base_dir}")
     latest = max(files, key=lambda f: f.stat().st_mtime)
@@ -110,7 +109,7 @@ def load_multi_wavelength_features(path):
     return data
 
 def save_multi_wavelength_features(
-        X_list, y, wavelengths, base_dir="MNIST/multi_wavelength"
+        X_list, y, wavelengths, base_dir="FASHION/multi_wavelength"
     ):
     """
     X_list: list of feature matrices [X_λ0, X_λ1, ...], each shape (N, D)
@@ -541,7 +540,7 @@ def visualize_results(X_images, y_labels, classifier, X_test, y_test, results, *
     y_pred = np.asarray(results[key]["y_pred"])
 
     # ensure output folder exists
-    save_dir=os.path.join("MNIST", "figures")
+    save_dir=os.path.join("FASHION", "figures")
     os.makedirs(save_dir, exist_ok=True)
 
     plt.figure(figsize=(12, 4))
@@ -612,12 +611,6 @@ def analyze_feature_importance(classifier, feature_names=None):
 # MAIN EXECUTION
 # ==========================
 def main_mnist_dual_wavelength():
-    """
-    Multi-wavelength MNIST experiment (3 wavelengths in WAVELENGTHS):
-
-    - If a multi-λ dataset exists and has enough samples per class, reuse it.
-    - Otherwise, measure a fresh balanced dataset at all wavelengths.
-    """
     print("="*60)
     print("MNIST CLASSIFICATION – MULTI WAVELENGTH")
     print("="*60)
@@ -625,91 +618,114 @@ def main_mnist_dual_wavelength():
     t0 = time.perf_counter()
     reservoir = None
 
+    # Variables always defined
+    X_stack = None
+    X_concat = None
+    y_all = None
+    wavelengths = None
+    counts = None
+    need_measurement = True
+
     try:
-        # ----------------------------------------
-        # TRY TO LOAD EXISTING MULTI-λ DATASET
-        # ----------------------------------------
-  
-        data = load_latest_multi_lambda(base_dir="MNIST/dual_wavelength")
-        X_stack = data["X_stack"]        # (N, L, D)
-        X_feat_concat = data["X_concat"] # (N, L*D)
-        y_all = data["y"]               # (N,)
-        wavelengths = data["wavelengths"]
+        # -------------------------------------------------------
+        # TRY TO LOAD EXISTING DATASET
+        # -------------------------------------------------------
+        try:
+            data = load_latest_multi_lambda(base_dir="FASHION/dual_wavelength")
 
-        counts = per_class_counts(y_all, n_classes=10)
-        print(f"[FASTPATH] Existing per-class counts: {counts} (target={N_SAMPLES_PER_DIGIT})")
-        print(f"[FASTPATH] Existing wavelengths (nm): {wavelengths}")
+            X_stack = data["X_stack"]
+            X_concat = data["X_concat"]
+            y_all = data["y"]
+            wavelengths = data["wavelengths"]
 
-        counts = per_class_counts(y_all, n_classes=10)
+            counts = per_class_counts(y_all)
+            print(f"[FASTPATH] Loaded dataset: {len(y_all)} samples")
+            print(f"[FASTPATH] Per-class counts: {counts}")
+            print(f"[FASTPATH] Wavelengths: {wavelengths}")
 
-        if len(wavelengths) == len(WAVELENGTHS):
-            # We have some data already → check missing per class
-            if np.all(counts >= N_SAMPLES_PER_DIGIT):
+            if len(wavelengths) == len(WAVELENGTHS) and np.all(counts >= N_SAMPLES_PER_DIGIT):
                 print("[FASTPATH] Dataset complete. Skipping measurement.")
                 need_measurement = False
             else:
-                print("[PARTIAL] Dataset incomplete. Will measure missing samples.")
+                print("[PARTIAL] Dataset incomplete or wavelength mismatch.")
                 need_measurement = True
-        else:
-            print("[MISMATCH] Wavelength count mismatch → full rebuild")
+
+        except FileNotFoundError:
+            print("[INFO] No dataset found — need full measurement.")
+            counts = np.zeros(10, dtype=int)
             need_measurement = True
 
-
+        # -------------------------------------------------------
+        # MEASUREMENT PHASE (only if needed)
+        # -------------------------------------------------------
         if need_measurement:
             print("[INFO] Measuring missing samples...")
 
             X_pool, y_pool = load_mnist_pool(max_per_class=N_SAMPLES_PER_DIGIT)
-
-            # Determine missing counts
             missing_per_class = np.maximum(N_SAMPLES_PER_DIGIT - counts, 0)
 
-            # Select only the needed images
             X_needed, y_needed = select_images_for_missing(X_pool, y_pool, missing_per_class)
 
             reservoir = PhotonicReservoirMNIST(INPUT_HEATERS, ALL_HEATERS)
 
-            X_new_list = []
+            X_new_per_lambda = []
+            y_new_ref = None
 
             for i, wl in enumerate(WAVELENGTHS):
-                X_new, y_new = measure_dataset_at_wavelength(
+                X_raw, y_raw = measure_dataset_at_wavelength(
                     reservoir, X_needed, y_needed, wl, phase_tag=f"LAMBDA{i+1}"
                 )
-                X_new_list.append(X_new)
 
-            # Combine old+new
-            X_stack_new = np.concatenate([X_stack, np.stack(X_new_list, axis=1)], axis=0)
-            X_concat_new = np.hstack([X_concat, np.hstack(X_new_list)])
-            y_all_new = np.concatenate([y_all, y_new])
-            
-            # Overwrite dataset
+                ok = ~np.isnan(X_raw).any(axis=1)
+                X_raw = X_raw[ok]
+                y_raw = y_raw[ok]
+
+                if y_new_ref is None:
+                    y_new_ref = y_raw
+                else:
+                    N = min(len(y_new_ref), len(y_raw))
+                    y_new_ref = y_new_ref[:N]
+                    X_raw = X_raw[:N]
+
+                X_new_per_lambda.append(X_raw)
+
+            # Combine wavelengths: stack = (N, L, D)
+            X_new_stack = np.stack(X_new_per_lambda, axis=1)
+            X_new_concat = np.hstack(X_new_per_lambda)
+
+            # Append to old dataset (if exists)
+            if X_stack is None:
+                X_stack = X_new_stack
+                X_concat = X_new_concat
+                y_all = y_new_ref
+            else:
+                X_stack = np.concatenate([X_stack, X_new_stack], axis=0)
+                X_concat = np.concatenate([X_concat, X_new_concat], axis=0)
+                y_all = np.concatenate([y_all, y_new_ref], axis=0)
+
+            # Save updated dataset
             save_multi_wavelength_features(
-                [X_stack_new[:, i, :] for i in range(len(WAVELENGTHS))],
-                y_all_new,
+                [X_stack[:, i, :] for i in range(len(WAVELENGTHS))],
+                y_all,
                 WAVELENGTHS,
-                base_dir="MNIST/dual_wavelength"
+                base_dir="FASHION/dual_wavelength"
             )
 
-            # Use new values from here
-            X_stack, X_concat, y_all = X_stack_new, X_concat_new, y_all_new
-
-
-        # ----------------------------------------
-        # COMMON PART: TRAINING & VISUALIZATION
-        # ----------------------------------------
+        # -------------------------------------------------------
+        # TRAINING
+        # -------------------------------------------------------
         N, L, D = X_stack.shape
-        print(f"[TRAIN] N={N}, L={L}, D={D}")
+        print(f"[TRAIN] Final dataset: N={N}, L={L}, D={D}")
 
-        # Train one classifier per wavelength
         per_lambda_results = []
         for i, wl in enumerate(WAVELENGTHS):
-            X_i = X_stack[:, i, :]  # (N, D)
             print(f"\n=== TRAINING: λ={wl} nm only ===")
-            models_i, results_i, test_data_i = train_mnist_classifier(X_i, y_all)
+            Xi = X_stack[:, i, :]
+            models_i, results_i, test_data_i = train_mnist_classifier(Xi, y_all)
             per_lambda_results.append((wl, models_i, results_i, test_data_i))
 
-        # Train on concatenated features
-        print("\n=== TRAINING: all λ concatenated ===")
-        models_cat, results_cat, test_data_cat = train_mnist_classifier(X_feat_concat, y_all)
+        print("\n=== TRAINING: ALL WAVELENGTHS CONCATENATED ===")
+        models_cat, results_cat, test_data_cat = train_mnist_classifier(X_concat, y_all)
 
         total_time = time.perf_counter() - t0
 
@@ -731,36 +747,33 @@ def main_mnist_dual_wavelength():
             run_tag="mnist_multi_lambda"
         )
 
-        # Summary helper
-        def best_acc(res_dict):
-            metrics = [(k, v["test_accuracy"]) for k, v in res_dict.items()
-                       if isinstance(v, dict) and "test_accuracy" in v]
-            if not metrics:
-                return None, 0.0
-            return max(metrics, key=lambda kv: kv[1])
-
         print("\n========== ACCURACY SUMMARY ==========")
-        for (wl, models_i, results_i, test_data_i) in per_lambda_results:
-            name_i, acc_i = best_acc(results_i)
-            print(f"λ={wl:.1f} nm : {name_i} → {acc_i:.3f}")
+        for (wl, _, results_i, _) in per_lambda_results:
+            best = max(
+                (v["test_accuracy"] for k, v in results_i.items()
+                 if isinstance(v, dict) and "test_accuracy" in v),
+                default=0
+            )
+            print(f"λ={wl} nm → {best:.3f}")
 
-        nameC, accC = best_acc(results_cat)
-        print(f"ALL λ concatenated : {nameC} → {accC:.3f}")
+        best_cat = max(
+            (v["test_accuracy"] for k, v in results_cat.items()
+             if isinstance(v, dict) and "test_accuracy" in v),
+            default=0
+        )
+        print(f"ALL λ → {best_cat:.3f}")
         print("======================================")
 
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
     except Exception as e:
         print(f"Error in multi-wavelength run: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
+
     finally:
         if reservoir is not None:
             try:
                 reservoir.close()
-            except Exception:
+            except:
                 pass
-
 
 if __name__ == "__main__":  
     main_mnist_dual_wavelength()
