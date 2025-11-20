@@ -28,10 +28,10 @@ FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
 
 READ_AVG = 1             # Fewer averages needed
 # Spatial encoding parameters
-SPATIAL_GAIN = 0.25     # How strongly pixels drive heaters
+SPATIAL_GAIN = 1     # How strongly pixels drive heaters
 LOAD_PATH = 'none*.npz'
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 250 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 100 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.3      # % for testing
 
 
@@ -252,45 +252,45 @@ class PhotonicReservoir:
                                  write_termination="", read_termination="")
 
         # # --- your existing mesh_bias, input_bias, baseline code here ---
-        # rng = np.random.default_rng(40)
-        # self.mesh_bias = {
-        #     h: float(rng.uniform(0.5, 4.5))
-        #     for h in self.internal_heaters
-        # }
-
-
-        non_linear = { 
-                "0": 4.202622623288022,
-                "1": 4.342763605135841,
-                "2": 3.098829001469486,
-                "3": 4.130521142259029,
-                "4": 3.001457261700803,
-                "5": 4.552619769400613,
-                "6": 2.436117075053776,
-                "7": 2.421557181706181,
-                "8": 1.1424261883464002,
-                "9": 2.9664336984042725,
-                "10": 4.053130393304921,
-                "11": 3.072196612654478,
-                "12": 2.370736535724698,
-                "13": 3.0569259837149856,
-                "14": 2.6701935879046763,
-                "15": 1.2111915958292376,
-                "16": 4.032639975768708,
-                "17": 2.3880453538074407,
-                "18": 4.491246582536434,
-                "19": 4.8221669700820495,
-                "20": 3.6029189509231334,
-                "21": 1.9799926280091045,
-                "22": 3.3384464322643486,
-                "23": 2.596296748885792,
-                "24": 1.1316601402043447,
-                "25": 3.6536980427074104,
-                "26": 4.426966155695784,
-                "27": 1.8462506378319095
+        rng = np.random.default_rng(40)
+        self.mesh_bias = {
+            h: float(rng.uniform(0.5, 4.5))
+            for h in self.internal_heaters
         }
-        non_linear_int = {int(k): float(v) for k, v in non_linear.items()}
-        self.mesh_bias = {h: non_linear_int[h] for h in self.internal_heaters}
+
+
+        # non_linear = { 
+        #         "0": 4.202622623288022,
+        #         "1": 4.342763605135841,
+        #         "2": 3.098829001469486,
+        #         "3": 4.130521142259029,
+        #         "4": 3.001457261700803,
+        #         "5": 4.552619769400613,
+        #         "6": 2.436117075053776,
+        #         "7": 2.421557181706181,
+        #         "8": 1.1424261883464002,
+        #         "9": 2.9664336984042725,
+        #         "10": 4.053130393304921,
+        #         "11": 3.072196612654478,
+        #         "12": 2.370736535724698,
+        #         "13": 3.0569259837149856,
+        #         "14": 2.6701935879046763,
+        #         "15": 1.2111915958292376,
+        #         "16": 4.032639975768708,
+        #         "17": 2.3880453538074407,
+        #         "18": 4.491246582536434,
+        #         "19": 4.8221669700820495,
+        #         "20": 3.6029189509231334,
+        #         "21": 1.9799926280091045,
+        #         "22": 3.3384464322643486,
+        #         "23": 2.596296748885792,
+        #         "24": 1.1316601402043447,
+        #         "25": 3.6536980427074104,
+        #         "26": 4.426966155695784,
+        #         "27": 1.8462506378319095
+        # }
+        #non_linear_int = {int(k): float(v) for k, v in non_linear.items()}
+        #self.mesh_bias = {h: non_linear_int[h] for h in self.internal_heaters}
         self.input_bias = {h: V_BIAS_INPUT for h in range(28, 35)}
 
         baseline = ({**self.mesh_bias, **self.input_bias})
@@ -774,6 +774,8 @@ def main_mnist_dual_wavelength():
                 reservoir.close()
             except:
                 pass
+
+
 
 if __name__ == "__main__":  
     main_mnist_dual_wavelength()

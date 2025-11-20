@@ -9,11 +9,11 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # Config
 # -----------------------------
 ROW_BANDS   = 7      # 28x28 -> 7 x ROW_BANDS
-K_VIRTUAL   = 2       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
+K_VIRTUAL   = 1       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
 MASK_SEED   = 42
-TEST_SIZE   = 0.2
+TEST_SIZE   = 0.3
 SEED        = 42
-N_PER_CLASS = 3000    
+N_PER_CLASS = 200    
 
 # -----------------------------
 # Helpers

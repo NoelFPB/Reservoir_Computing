@@ -5,7 +5,7 @@ from sklearn.decomposition import PCA
 # --------------------------
 # Load your multi-λ dataset
 # --------------------------
-data = np.load("multi_lambda_20251118_205553.npz")
+data = np.load("multi_lambda_20251120_011637.npz")
 X_stack = data["X_stack"]         # (N, L, D)
 y = data["y"]                     # (N,)
 wavelengths = data["wavelengths"] # shape (L,)
